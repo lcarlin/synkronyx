@@ -149,7 +149,10 @@ meio do arquivo que preserve o tamanho. O tipo do digest é persistido junto
 com o valor, e comparar tipos diferentes é recusado em vez de dar uma resposta
 sem significado.
 
-O padrão é `0`: digest completo, sem pontos cegos.
+O padrão é `100 MiB`. Abaixo dele — onde vive a esmagadora maioria dos
+arquivos — o digest é completo e prova igualdade. Acima, vira evidência forte
+em vez de prova, e o Full Resync é a rede que pega o que a amostra não viu.
+`0` desliga a amostragem inteiramente.
 
 ### Paralelismo
 

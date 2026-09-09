@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"bytes"
 	"log/slog"
 	"net"
 	"os"
@@ -143,5 +144,88 @@ func TestSpecialFilesErrorPolicyLogs(t *testing.T) {
 	}
 	if eng.skipSpecial("normal.txt", hash.KindRegular, log) {
 		t.Error("arquivo comum não deveria ser ignorado")
+	}
+}
+
+// Com a amostragem ligada, o engine precisa continuar propagando alterações
+// que a amostra enxerga. O limite aqui é baixo de propósito, para o teste
+// rodar rápido; o mecanismo é o mesmo do padrão de 100 MiB.
+func TestPropagatesLargeFilesUnderSampledDigest(t *testing.T) {
+	h := newHarness(t, func(c *config.Config) {
+		c.HashMaxBytes = 8 << 10    // 8 KiB
+		c.HashSampleBytes = 1 << 10 // 1 KiB de cada ponta
+	})
+
+	big := make([]byte, 64<<10)
+	for i := range big {
+		big[i] = byte(i)
+	}
+	src := filepath.Join(h.A, "grande.bin")
+	dst := filepath.Join(h.B, "grande.bin")
+
+	if err := os.WriteFile(src, big, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	waitSameContent(t, src, dst)
+
+	// Append: a amostra cobre a cauda, então precisa ser detectado.
+	f, err := os.OpenFile(src, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.Write([]byte("dados novos no fim")); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+
+	waitSameContent(t, src, dst)
+}
+
+// waitSameContent espera os dois arquivos ficarem byte a byte iguais.
+//
+// Comparar com a origem, em vez de com um tamanho esperado, evita depender de
+// quando exatamente cada etapa termina: a invariante do sistema é justamente
+// que os dois lados convergem.
+func waitSameContent(t *testing.T, src, dst string) {
+	t.Helper()
+
+	deadline := time.Now().Add(10 * time.Second)
+	var lastSrc, lastDst int
+	for time.Now().Before(deadline) {
+		a, errA := os.ReadFile(src)
+		b, errB := os.ReadFile(dst)
+		if errA == nil && errB == nil {
+			lastSrc, lastDst = len(a), len(b)
+			if bytes.Equal(a, b) {
+				return
+			}
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	t.Fatalf("os lados não convergiram: origem %d bytes, destino %d", lastSrc, lastDst)
+}
+
+// O digest gravado no estado precisa refletir o tipo amostrado, senão uma
+// comparação futura confrontaria tipos diferentes sem perceber.
+func TestStateRecordsPartialDigestKind(t *testing.T) {
+	eng, cfg, _ := newIdleEngine(t, func(c *config.Config) {
+		c.HashMaxBytes = 4 << 10
+		c.HashSampleBytes = 512
+	})
+
+	abs := filepath.Join(cfg.A, "grande.bin")
+	if err := os.WriteFile(abs, make([]byte, 32<<10), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	d, err := eng.digestOf(abs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.Kind != hash.KindPartial {
+		t.Errorf("Kind = %q, quero %q acima do limite", d.Kind, hash.KindPartial)
+	}
+	if d.Size != 32<<10 {
+		t.Errorf("Size = %d, quero %d", d.Size, 32<<10)
 	}
 }

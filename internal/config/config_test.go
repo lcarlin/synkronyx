@@ -250,3 +250,14 @@ func TestDefaultProgressInterval(t *testing.T) {
 		t.Errorf("ProgressInterval padrão = %s, quero 30s", got)
 	}
 }
+
+func TestDefaultHashMaxBytes(t *testing.T) {
+	if got := Default().HashMaxBytes; got != 100<<20 {
+		t.Errorf("HashMaxBytes padrão = %d, quero %d (100 MiB)", got, 100<<20)
+	}
+	// A amostra precisa caber com folga dentro do limite, senão ela cobriria
+	// o arquivo inteiro e a configuração não faria o que promete.
+	if err := Default().validateHashes(); err != nil {
+		t.Errorf("os padrões de hash não são coerentes entre si: %v", err)
+	}
+}

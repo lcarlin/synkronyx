@@ -31,7 +31,9 @@ comparar tipos diferentes.
 tamanho não é detectada. Append, truncamento, cabeçalho e cauda são.
 `TestPartialDetectsRealisticChanges` fixa o contrato, ponto cego incluído.
 
-O padrão é `0` — digest completo, sem pontos cegos.
+O padrão é `100 MiB`: abaixo disso o digest é completo e prova igualdade;
+acima, é evidência forte, e o Full Resync cobre o que a amostra não viu. `0`
+desliga a amostragem, ao custo de ler cada arquivo inteiro a cada evento.
 
 ### Symlinks
 

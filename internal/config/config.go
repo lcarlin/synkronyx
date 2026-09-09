@@ -49,7 +49,7 @@ type Config struct {
 	LogLevel string `yaml:"log_level"`
 
 	// HashMaxBytes é o tamanho a partir do qual o digest passa a ser
-	// amostrado em vez de completo. 0 = sempre completo.
+	// amostrado em vez de completo. 0 = sempre completo, sem pontos cegos.
 	HashMaxBytes int64 `yaml:"hash_max_bytes"`
 
 	// HashSampleBytes é quanto se lê de cada extremidade no digest amostrado.
@@ -137,6 +137,20 @@ const (
 	FirstSyncBWins FirstSyncPolicy = "b-wins"
 )
 
+// DefaultHashMaxBytes é o tamanho a partir do qual o digest passa a ser
+// amostrado.
+//
+// Acima dele, o digest deixa de ser prova de igualdade e passa a ser
+// evidência forte: cobre tamanho, início e fim do arquivo, e portanto detecta
+// append, truncamento, reescrita de cabeçalho e alteração de cauda — mas não
+// uma alteração no meio que preserve o tamanho exato.
+//
+// O limite é alto de propósito. Abaixo dele, que é onde vive a esmagadora
+// maioria dos arquivos, nada muda: o digest continua completo. Acima, ler o
+// arquivo inteiro a cada evento custaria mais do que a certeza vale, e o Full
+// Resync continua sendo a rede que pega o que a amostra não viu.
+const DefaultHashMaxBytes int64 = 100 << 20 // 100 MiB
+
 // Default devolve a configuração padrão, antes de qualquer arquivo.
 func Default() Config {
 	return Config{
@@ -150,6 +164,7 @@ func Default() Config {
 		LogLevel:        "info",
 		Exclude:         []string{".synkronyx", ".synkronyx-tmp-*", "*.sync-conflict-*"},
 
+		HashMaxBytes:      DefaultHashMaxBytes,
 		HashSampleBytes:   hash.DefaultSampleBytes,
 		PreserveHardlinks: false,
 		DirDeletePolicy:   DirDeletePreserveUnknown,
@@ -193,6 +208,27 @@ func (c *Config) normalize() error {
 			return fmt.Errorf("resolvendo path %q: %w", *p, err)
 		}
 		*p = filepath.Clean(abs)
+	}
+	return nil
+}
+
+// validateHashes confere a coerência entre o limite e o tamanho da amostra.
+func (c Config) validateHashes() error {
+	if c.HashMaxBytes < 0 {
+		return errors.New("hash_max_bytes não pode ser negativo")
+	}
+	if c.HashMaxBytes == 0 {
+		return nil
+	}
+	if c.HashSampleBytes <= 0 {
+		return errors.New("hash_sample_bytes deve ser > 0 quando hash_max_bytes está ativo")
+	}
+	if c.HashSampleBytes*2 >= c.HashMaxBytes {
+		// Amostrar 2x mais do que o limite significa ler o arquivo todo de
+		// qualquer jeito: a configuração não faria o que promete.
+		return fmt.Errorf(
+			"hash_sample_bytes (%d) x2 deve ser menor que hash_max_bytes (%d), senão a amostra cobre o arquivo inteiro",
+			c.HashSampleBytes, c.HashMaxBytes)
 	}
 	return nil
 }
@@ -251,18 +287,8 @@ func (c Config) Validate() error {
 	default:
 		errs = append(errs, fmt.Errorf("dir_delete_policy inválida: %q", c.DirDeletePolicy))
 	}
-	if c.HashMaxBytes < 0 {
-		errs = append(errs, errors.New("hash_max_bytes não pode ser negativo"))
-	}
-	if c.HashMaxBytes > 0 && c.HashSampleBytes <= 0 {
-		errs = append(errs, errors.New("hash_sample_bytes deve ser > 0 quando hash_max_bytes está ativo"))
-	}
-	if c.HashMaxBytes > 0 && c.HashSampleBytes*2 >= c.HashMaxBytes {
-		// Amostrar 2x mais do que o limite significa ler o arquivo todo de
-		// qualquer jeito: a configuração não faria o que promete.
-		errs = append(errs, fmt.Errorf(
-			"hash_sample_bytes (%d) x2 deve ser menor que hash_max_bytes (%d), senão a amostra cobre o arquivo inteiro",
-			c.HashSampleBytes, c.HashMaxBytes))
+	if err := c.validateHashes(); err != nil {
+		errs = append(errs, err)
 	}
 	if c.RetryMaxAttempts < 0 {
 		errs = append(errs, errors.New("retry_max_attempts não pode ser negativo"))

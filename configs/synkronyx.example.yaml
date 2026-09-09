@@ -57,11 +57,17 @@ rsync_args:
 log_level: info
 
 # Acima deste tamanho o digest passa a ser amostrado em vez de completo:
-# tamanho + os primeiros e os últimos hash_sample_bytes. Detecta append,
-# truncamento e reescrita de cabeçalho por custo fixo, mas não enxerga uma
-# alteração no meio de um arquivo grande que preserve o tamanho.
-# 0 = sempre completo (padrão, mais lento e sem pontos cegos).
-hash_max_bytes: 0
+# tamanho + os primeiros e os últimos hash_sample_bytes.
+#
+# Isso detecta append, truncamento, reescrita de cabeçalho e alteração de
+# cauda por custo fixo — mas NÃO enxerga uma alteração no meio de um arquivo
+# grande que preserve o tamanho exato. Acima do limite, o digest deixa de ser
+# prova de igualdade e passa a ser evidência forte; o full resync é a rede que
+# pega o resto.
+#
+# 0 desliga a amostragem: digest completo sempre, sem pontos cegos, ao custo
+# de ler o arquivo inteiro a cada evento.
+hash_max_bytes: 104857600   # 100 MiB
 hash_sample_bytes: 2097152  # 2 MiB de cada extremidade
 
 # --hard-links só funciona dentro de uma mesma invocação do rsync, então a
