@@ -169,6 +169,18 @@ A origem é decidida como no conteúdo, pelo estado. Quando os dois lados
 mudaram, vence o mtime mais recente: atributos não são dados, e preservar as
 duas versões não significaria nada.
 
+Os bits comparados são os nove habituais **mais setuid, setgid e sticky**
+(`hash.PermMask`). `os.FileMode.Perm()` mascara para 0777 e descartava
+exatamente os três em que perder a diferença tem consequência: um binário que
+perde o setuid deixa de funcionar.
+
+Symlinks recebem só o mtime, ajustado no próprio link via `UtimesNanoAt` com
+`AT_SYMLINK_NOFOLLOW`. No Linux, `chmod` em um symlink age sobre o alvo — que
+é outro arquivo, possivelmente fora da árvore — e `os.Chtimes` segue o link
+pelo mesmo motivo. Ignorar o mtime do link não era opção: a divergência era
+detectada, a sincronização não a resolvia, e cada resync refazia o mesmo
+trabalho para sempre.
+
 **Custo aceito:** quando um arquivo acima de `hash_max_bytes` tem só o mtime
 alterado, a reconciliação não consegue distinguir isso de uma alteração no meio
 que a amostra não vê — as duas situações são idênticas para ela. Escolhe o

@@ -210,3 +210,92 @@ func TestSyncAttrsDoesNotCreateMissingFile(t *testing.T) {
 		t.Error("SyncAttrs criou um arquivo que não existia")
 	}
 }
+
+// setuid, setgid e sticky também são permissões, e os.FileMode.Perm() os
+// descarta. Um binário que perde o setuid deixa de funcionar.
+func TestSyncAttrsPropagatesSpecialBits(t *testing.T) {
+	xf := newTransfer(t)
+	dir := t.TempDir()
+
+	src := filepath.Join(dir, "origem")
+	dst := filepath.Join(dir, "destino")
+	for _, p := range []string{src, dst} {
+		if err := os.WriteFile(p, []byte("igual"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Chmod(src, os.FileMode(0o755)|os.ModeSetgid); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dst, os.FileMode(0o755)|os.ModeSetuid); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := xf.SyncAttrs(context.Background(), src, dst); err != nil {
+		t.Fatal(err)
+	}
+
+	fi, err := os.Stat(dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode()&os.ModeSetgid == 0 {
+		t.Errorf("setgid não foi propagado; modo = %v", fi.Mode())
+	}
+	if fi.Mode()&os.ModeSetuid != 0 {
+		t.Errorf("setuid antigo permaneceu; modo = %v", fi.Mode())
+	}
+}
+
+// O mtime de um symlink precisa ser ajustado no próprio link, não no alvo.
+func TestSyncAttrsTouchesSymlinkNotTarget(t *testing.T) {
+	xf := newTransfer(t)
+	dir := t.TempDir()
+
+	alvo := filepath.Join(dir, "alvo.txt")
+	if err := os.WriteFile(alvo, []byte("conteudo"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	src := filepath.Join(dir, "link-src")
+	dst := filepath.Join(dir, "link-dst")
+	for _, p := range []string{src, dst} {
+		if err := os.Symlink("alvo.txt", p); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// mtime do alvo, para conferir depois que não foi tocado.
+	alvoAntes, err := os.Stat(alvo)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	quando := time.Unix(1_600_000_000, 0)
+	if err := lchtimes(src, quando); err != nil {
+		t.Skipf("lchtimes indisponível neste filesystem: %v", err)
+	}
+
+	if err := xf.SyncAttrs(context.Background(), src, dst); err != nil {
+		t.Fatal(err)
+	}
+
+	fiSrc, err := os.Lstat(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fiDst, err := os.Lstat(dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !fiSrc.ModTime().Equal(fiDst.ModTime()) {
+		t.Errorf("mtime do link não convergiu: src=%s dst=%s", fiSrc.ModTime(), fiDst.ModTime())
+	}
+
+	alvoDepois, err := os.Stat(alvo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !alvoAntes.ModTime().Equal(alvoDepois.ModTime()) {
+		t.Error("o mtime do alvo foi alterado; a operação seguiu o symlink")
+	}
+}

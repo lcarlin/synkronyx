@@ -76,6 +76,21 @@ func StatOf(abs string) (Stat, error) {
 	}, nil
 }
 
+// PermMask são os bits de permissão que o Synkronyx sincroniza: os nove
+// habituais mais setuid, setgid e sticky.
+//
+// os.FileMode.Perm() sozinho não serve, porque mascara para 0777 e descarta
+// justamente os três que mais importam quando mudam. Um binário que perde o
+// setuid deixa de funcionar; um que ganha um setuid indevido é problema de
+// outra ordem. Nenhum dos dois pode passar despercebido.
+const PermMask = os.ModePerm | os.ModeSetuid | os.ModeSetgid | os.ModeSticky
+
+// Perms extrai de um modo os bits que são sincronizados.
+func Perms(m os.FileMode) os.FileMode { return m & PermMask }
+
+// Perms devolve os bits de permissão sincronizados desta entrada.
+func (s Stat) Perms() os.FileMode { return Perms(s.Mode) }
+
 // KindOf classifica a partir do modo devolvido por Lstat.
 func KindOf(mode os.FileMode) FileKind {
 	switch {

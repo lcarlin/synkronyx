@@ -16,6 +16,11 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
+
+	"golang.org/x/sys/unix"
+
+	"github.com/lcarlin/synkronyx/internal/hash"
 )
 
 // Transfer aplica operações no filesystem destino.
@@ -165,8 +170,13 @@ func (t *Transfer) Remove(path string, isDir bool) error {
 // os atributos deste diretório". E chamar um processo externo para duas
 // syscalls é desproporcional.
 //
-// Não cria o que não existe, e não segue symlinks: chmod em um symlink
-// mudaria o modo do alvo, que é outro arquivo, possivelmente fora da árvore.
+// Não cria o que não existe. Symlinks recebem apenas o mtime, pelo próprio
+// link: no Linux, chmod em um symlink age sobre o alvo, que é outro arquivo e
+// pode estar fora da árvore.
+//
+// O mtime de um symlink parece detalhe sem importância e não é: se ele nunca
+// for igualado, cada reconciliação enxerga a mesma divergência e refaz o mesmo
+// trabalho, para sempre, sem nunca convergir.
 func (t *Transfer) SyncAttrs(_ context.Context, src, dst string) error {
 	srcInfo, err := os.Lstat(src)
 	if err != nil {
@@ -179,18 +189,40 @@ func (t *Transfer) SyncAttrs(_ context.Context, src, dst string) error {
 		}
 		return err
 	}
-	if srcInfo.Mode()&os.ModeSymlink != 0 || dstInfo.Mode()&os.ModeSymlink != 0 {
+
+	srcLink := srcInfo.Mode()&os.ModeSymlink != 0
+	dstLink := dstInfo.Mode()&os.ModeSymlink != 0
+	if srcLink != dstLink {
+		// Tipos divergentes não se resolvem ajustando atributos.
 		return nil
 	}
+	if srcLink {
+		return lchtimes(dst, srcInfo.ModTime())
+	}
 
-	if srcInfo.Mode().Perm() != dstInfo.Mode().Perm() {
-		if err := os.Chmod(dst, srcInfo.Mode().Perm()); err != nil {
+	if hash.Perms(srcInfo.Mode()) != hash.Perms(dstInfo.Mode()) {
+		if err := os.Chmod(dst, hash.Perms(srcInfo.Mode())); err != nil {
 			return fmt.Errorf("ajustando modo de %s: %w", dst, err)
 		}
 	}
 	mtime := srcInfo.ModTime()
 	if err := os.Chtimes(dst, mtime, mtime); err != nil {
 		return fmt.Errorf("ajustando timestamps de %s: %w", dst, err)
+	}
+	return nil
+}
+
+// lchtimes ajusta o mtime de um path sem seguir symlinks.
+//
+// os.Chtimes segue o link, o que mudaria o timestamp do alvo em vez do link.
+// Não há equivalente na biblioteca padrão, daí a syscall direta.
+func lchtimes(path string, mtime time.Time) error {
+	ts := []unix.Timespec{
+		unix.NsecToTimespec(mtime.UnixNano()), // atime: igualado ao mtime
+		unix.NsecToTimespec(mtime.UnixNano()),
+	}
+	if err := unix.UtimesNanoAt(unix.AT_FDCWD, path, ts, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		return fmt.Errorf("ajustando mtime do symlink %s: %w", path, err)
 	}
 	return nil
 }

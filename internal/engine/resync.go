@@ -693,6 +693,7 @@ func (e *Engine) reconcileAttrs(ctx context.Context, rel string, stA, stB hash.S
 	case entryA != nil && entryB != nil:
 		changedA := attrsDiverged(stA, entryA.Stat())
 		changedB := attrsDiverged(stB, entryB.Stat())
+
 		switch {
 		case changedA && !changedB:
 			origin = event.SideA
@@ -707,7 +708,7 @@ func (e *Engine) reconcileAttrs(ctx context.Context, rel string, stA, stB hash.S
 
 	e.log.Info("propagando atributos divergentes", "path", rel,
 		"origem", origin.String(),
-		"modo_a", stA.Mode.Perm().String(), "modo_b", stB.Mode.Perm().String(),
+		"modo_a", stA.Perms().String(), "modo_b", stB.Perms().String(),
 		"mtime_a", stA.MTime.Format(time.RFC3339), "mtime_b", stB.MTime.Format(time.RFC3339))
 
 	ev := event.Event{Side: origin, Kind: event.KindAttrib, Path: rel, At: time.Now()}
@@ -737,7 +738,9 @@ func newerSide(stA, stB hash.Stat) event.Side {
 // A tolerância de um segundo vem de Stat.Unchanged, e existe porque nem todo
 // filesystem guarda sub-segundo.
 func attrsDiverged(a, b hash.Stat) bool {
-	if a.Mode.Perm() != b.Mode.Perm() {
+	// Perms, e não Perm(): setuid, setgid e sticky também são sincronizados, e
+	// Perm() os descartaria.
+	if a.Perms() != b.Perms() {
 		return true
 	}
 	// Unchanged compara tamanho, tipo e mtime; aqui só o mtime interessa,

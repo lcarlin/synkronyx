@@ -724,3 +724,96 @@ func TestReconcileAttrsConvergesInOnePass(t *testing.T) {
 		t.Error("a segunda passada mexeu nos arquivos: os atributos não convergiram")
 	}
 }
+
+// TestReconcileSymlinkAttrsConverge é regressão de um trabalho perpétuo: o
+// mtime de um symlink divergente era detectado, a sincronização de atributos
+// pulava symlinks por completo, e a divergência reaparecia em todo resync —
+// para sempre, sem nunca convergir.
+func TestReconcileSymlinkAttrsConverge(t *testing.T) {
+	eng, cfg, _ := newIdleEngine(t, nil)
+	ctx := context.Background()
+
+	for _, root := range []string{cfg.A, cfg.B} {
+		if err := os.WriteFile(filepath.Join(root, "alvo.txt"), []byte("conteudo"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink("alvo.txt", filepath.Join(root, "link")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, rel := range []string{"alvo.txt", "link"} {
+		if err := eng.recordPair(ctx, rel, filepath.Join(cfg.A, rel), filepath.Join(cfg.B, rel), false); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Só o mtime do link de A muda.
+	if err := eng.xfer.SyncAttrs(ctx, filepath.Join(cfg.A, "alvo.txt"), filepath.Join(cfg.A, "link")); err != nil {
+		t.Skipf("ajuste de mtime de symlink indisponível: %v", err)
+	}
+
+	// Duas passadas: a primeira deve resolver, a segunda não deve achar nada.
+	if err := eng.reconcile(ctx, "primeira", "."); err != nil {
+		t.Fatal(err)
+	}
+	fiA, err := os.Lstat(filepath.Join(cfg.A, "link"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fiB, err := os.Lstat(filepath.Join(cfg.B, "link"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d := fiA.ModTime().Sub(fiB.ModTime()); d > time.Second || d < -time.Second {
+		t.Errorf("mtime do symlink não convergiu: A=%s B=%s", fiA.ModTime(), fiB.ModTime())
+	}
+
+	// Estabilidade: nada pode se mexer na segunda passada.
+	if err := eng.reconcile(ctx, "segunda", "."); err != nil {
+		t.Fatal(err)
+	}
+	againA, err := os.Lstat(filepath.Join(cfg.A, "link"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !fiA.ModTime().Equal(againA.ModTime()) {
+		t.Error("a segunda passada mexeu no link: não convergiu")
+	}
+}
+
+// Bits especiais divergentes precisam ser reconciliados: o setuid é o caso em
+// que perder a diferença tem consequência prática.
+func TestReconcilePropagatesSpecialBits(t *testing.T) {
+	eng, cfg, _ := newIdleEngine(t, nil)
+	ctx := context.Background()
+
+	rel := "binario"
+	absA, absB := filepath.Join(cfg.A, rel), filepath.Join(cfg.B, rel)
+	for _, p := range []string{absA, absB} {
+		if err := os.WriteFile(p, []byte("igual"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(p, os.FileMode(0o755)|os.ModeSetuid); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := eng.recordPair(ctx, rel, absA, absB, false); err != nil {
+		t.Fatal(err)
+	}
+
+	// A troca setuid -> setgid não muda nenhum dos nove bits de Perm().
+	if err := os.Chmod(absA, os.FileMode(0o755)|os.ModeSetgid); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := eng.reconcile(ctx, "teste", "."); err != nil {
+		t.Fatal(err)
+	}
+	fi, err := os.Stat(absB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode()&os.ModeSetgid == 0 || fi.Mode()&os.ModeSetuid != 0 {
+		t.Errorf("bits especiais não reconciliados; modo em B = %v", fi.Mode())
+	}
+}
