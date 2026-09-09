@@ -153,11 +153,12 @@ O padrão é `100 MiB`, com amostra de 4 MiB de cada ponta. Abaixo do limite —
 onde vive a esmagadora maioria dos arquivos — o digest é completo e prova
 igualdade.
 
-O ponto cego acima do limite é mais estreito do que parece: no fluxo de
-eventos, uma escrita sempre altera o mtime, que é comparado antes do digest,
-então a alteração é propagada de qualquer forma. O digest amostrado só decide
-sozinho na reconciliação, quando os dois lados têm mesmo tamanho e mesmo
-mtime — a divergência ocorrida com o serviço parado. `0` desliga a amostragem.
+O ponto cego acima do limite é estreito. No fluxo de eventos, uma escrita
+sempre altera o mtime, comparado antes do digest, então a alteração é
+propagada de qualquer forma. Na reconciliação, digests amostrados iguais com
+mtimes diferentes contam como divergência — um par sincronizado tem mtimes
+idênticos, porque o rsync preserva o da origem. Resta a janela em que a
+alteração cabe na tolerância de mtime de um segundo. `0` desliga a amostragem.
 
 ### Paralelismo
 

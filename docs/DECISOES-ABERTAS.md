@@ -31,13 +31,24 @@ comparar tipos diferentes.
 tamanho não é detectada pelo digest. Append, truncamento, cabeçalho e cauda
 são. `TestPartialDetectsRealisticChanges` fixa o contrato, ponto cego incluído.
 
-O alcance da limitação é menor do que a frase sugere, e vale precisar. No
-fluxo de eventos o digest não decide sozinho: `alreadySynced` compara mtime
+O alcance da limitação é menor do que a frase sugere, e vale precisar, porque
+a primeira versão desta seção prometia mais do que o código entregava.
+
+No fluxo de eventos o digest não decide sozinho: `alreadySynced` compara mtime
 antes, e uma escrita sempre altera o mtime, então a alteração é propagada
-mesmo que a amostra não a enxergue. O ponto cego só se manifesta na
-reconciliação, onde `contentDiffers` vai direto aos digests — ou seja, quando
-os dois lados divergiram com o serviço parado e terminaram com o mesmo
-tamanho e o mesmo mtime.
+mesmo que a amostra não a enxergue.
+
+Na reconciliação o digest decidia sozinho, e isso era um buraco de verdade: um
+arquivo grande alterado no meio atravessava o Full Resync sendo declarado
+idêntico — justamente a rede que a documentação dizia existir para esse caso.
+Hoje `sampledButStale` usa o mtime como desempate: digests amostrados iguais
+com mtimes diferentes contam como divergência. Um par sincronizado tem mtimes
+idênticos, porque o rsync preserva o da origem, então a evidência é confiável.
+
+O que sobra é uma janela estreita: alteração no meio de um arquivo grande,
+preservando o tamanho, feita dentro da tolerância de mtime de um segundo em
+relação à última sincronização. `TestFullResyncCatchesMiddleChangeInLargeFile`
+e `TestSampledDigestWithEqualMtimeIsNoop` fixam os dois lados do contrato.
 
 O padrão é `100 MiB`: abaixo disso o digest é completo e prova igualdade;
 acima, é evidência forte, e o Full Resync cobre o que a amostra não viu. `0`

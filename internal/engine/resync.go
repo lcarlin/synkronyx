@@ -304,9 +304,10 @@ type comparison struct {
 // resultado, só o tempo.
 func (e *Engine) compareInParallel(ctx context.Context, invA, invB scan.Inventory) map[string]comparison {
 	type job struct {
-		rel  string
-		absA string
-		absB string
+		rel      string
+		absA     string
+		absB     string
+		stA, stB hash.Stat
 	}
 
 	var jobs []job
@@ -315,7 +316,11 @@ func (e *Engine) compareInParallel(ctx context.Context, invA, invB scan.Inventor
 		if !ok || stA.IsDir || stB.IsDir || stA.IsSpecial() || stB.IsSpecial() {
 			continue
 		}
-		jobs = append(jobs, job{rel: rel, absA: e.abs(event.SideA, rel), absB: e.abs(event.SideB, rel)})
+		jobs = append(jobs, job{
+			rel:  rel,
+			absA: e.abs(event.SideA, rel), absB: e.abs(event.SideB, rel),
+			stA: stA, stB: stB,
+		})
 	}
 	if len(jobs) == 0 {
 		return nil
@@ -340,6 +345,9 @@ func (e *Engine) compareInParallel(ctx context.Context, invA, invB scan.Inventor
 			defer wg.Done()
 			for j := range next {
 				differs, dA, dB, err := e.compareContent(j.absA, j.absB)
+				if !differs && err == nil {
+					differs = sampledButStale(dA, dB, j.stA, j.stB)
+				}
 				mu.Lock()
 				out[j.rel] = comparison{
 					digestA: dA, digestB: dB,
@@ -547,7 +555,7 @@ func (e *Engine) reconcileBothSides(ctx context.Context, rel string, stA, stB ha
 		//
 		// Consultar o estado aqui é o que evita que toda edição feita com o
 		// serviço parado vire um arquivo .sync-conflict- sem motivo.
-		origin, decided, err := e.originOf(ctx, rel, cmp)
+		origin, decided, err := e.originOf(ctx, rel, cmp, stA, stB)
 		if err != nil {
 			return reconcileNoop, err
 		}
@@ -579,7 +587,9 @@ func (e *Engine) reconcileBothSides(ctx context.Context, rel string, stA, stB ha
 // inconsistente com o disco) ou quando não há estado para comparar: nesses
 // casos ninguém pode afirmar de onde veio a versão boa, e a decisão cabe à
 // política de conflito.
-func (e *Engine) originOf(ctx context.Context, rel string, cmp comparison) (event.Side, bool, error) {
+func (e *Engine) originOf(ctx context.Context, rel string, cmp comparison,
+	stA, stB hash.Stat) (event.Side, bool, error) {
+
 	entryA, err := e.db.Get(ctx, event.SideA, rel)
 	if err != nil {
 		return event.SideA, false, err
@@ -593,8 +603,8 @@ func (e *Engine) originOf(ctx context.Context, rel string, cmp comparison) (even
 		return event.SideA, false, nil
 	}
 
-	changedA := hash.Compare(cmp.digestA, entryA.Digest) != hash.Same
-	changedB := hash.Compare(cmp.digestB, entryB.Digest) != hash.Same
+	changedA := sideChanged(cmp.digestA, stA, *entryA)
+	changedB := sideChanged(cmp.digestB, stB, *entryB)
 
 	switch {
 	case changedA && !changedB:
@@ -604,4 +614,46 @@ func (e *Engine) originOf(ctx context.Context, rel string, cmp comparison) (even
 	default:
 		return event.SideA, false, nil
 	}
+}
+
+// sampledButStale decide se dois digests amostrados iguais devem, mesmo
+// assim, ser tratados como divergentes.
+//
+// Um digest amostrado não prova igualdade: ele cobre tamanho, início e fim, e
+// uma alteração no meio de um arquivo grande passa por ele. No fluxo de
+// eventos isso não importa, porque o mtime é comparado antes. Na
+// reconciliação importava, e era um buraco de verdade — a única rede que
+// deveria pegar o caso usava exatamente o mesmo digest cego.
+//
+// Mtimes iguais são o estado normal de um par sincronizado, porque o rsync
+// preserva o mtime da origem. Mtimes diferentes sob digest amostrado são,
+// portanto, evidência de que algo mudou onde a amostra não olha — e o
+// conservador é acreditar no mtime.
+//
+// O custo de errar para mais é uma transferência a mais, na qual o algoritmo
+// delta do rsync não vai copiar quase nada se os arquivos forem mesmo iguais.
+// O custo de errar para menos é divergência silenciosa que sobrevive ao full
+// resync.
+func sampledButStale(dA, dB hash.Digest, stA, stB hash.Stat) bool {
+	if dA.Kind != hash.KindPartial || dB.Kind != hash.KindPartial {
+		return false
+	}
+	return !stA.Unchanged(stB)
+}
+
+// sideChanged informa se um lado se afastou do que o estado registra.
+//
+// O digest é a evidência principal. Quando ele é amostrado, porém, digest
+// igual não prova nada — é o mesmo ponto cego de sampledButStale —, e o mtime
+// entra como segunda evidência. Sem isso, uma alteração no meio de um arquivo
+// grande seria detectada como divergência mas não teria origem atribuída, e
+// acabaria tratada como conflito apesar de um lado só ter mudado.
+func sideChanged(current hash.Digest, st hash.Stat, recorded state.Entry) bool {
+	if hash.Compare(current, recorded.Digest) != hash.Same {
+		return true
+	}
+	if current.Kind == hash.KindPartial {
+		return !st.Unchanged(recorded.Stat())
+	}
+	return false
 }

@@ -2,6 +2,7 @@ package engine
 
 import (
 	"bytes"
+	"context"
 	"log/slog"
 	"net"
 	"os"
@@ -288,5 +289,191 @@ func TestBlindSpotOnlyAffectsReconciliation(t *testing.T) {
 	}
 	if entry.MTime.Equal(when) {
 		t.Error("o estado deveria registrar o mtime novo, que é o que dispara a propagação")
+	}
+}
+
+// TestFullResyncCatchesMiddleChangeInLargeFile é regressão de uma divergência
+// que sobrevivia ao full resync.
+//
+// A documentação prometia que o full resync era a rede que pegava o que a
+// amostra não via. Não era: ele usa o mesmo digest amostrado, então um arquivo
+// grande alterado no meio, com o tamanho preservado, atravessava a
+// reconciliação inteira sendo declarado idêntico.
+//
+// O mtime estava disponível o tempo todo e era ignorado.
+func TestFullResyncCatchesMiddleChangeInLargeFile(t *testing.T) {
+	eng, cfg, _ := newIdleEngine(t, func(c *config.Config) {
+		c.HashMaxBytes = 8 << 10
+		c.HashSampleBytes = 1 << 10
+	})
+	if testing.Verbose() {
+		eng.log = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	}
+	ctx := context.Background()
+
+	rel := "grande.bin"
+	absA, absB := filepath.Join(cfg.A, rel), filepath.Join(cfg.B, rel)
+	buf := make([]byte, 64<<10)
+	for _, p := range []string{absA, absB} {
+		if err := os.WriteFile(p, buf, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Par sincronizado tem o mesmo mtime, porque o rsync preserva o da origem.
+	synced := time.Now().Add(-time.Hour)
+	for _, p := range []string{absA, absB} {
+		if err := os.Chtimes(p, synced, synced); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := eng.recordPair(ctx, rel, absA, absB, false); err != nil {
+		t.Fatal(err)
+	}
+
+	// Alteração no meio, tamanho preservado: fora do alcance da amostra.
+	f, err := os.OpenFile(absA, os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteAt([]byte("ALTERADO"), 32<<10); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+
+	// A escrita atualiza o mtime de A; o de B fica onde estava. É essa
+	// diferença que denuncia a alteração que a amostra não vê.
+	edited := synced.Add(30 * time.Minute)
+	if err := os.Chtimes(absA, edited, edited); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := eng.reconcile(ctx, "teste", "."); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := os.ReadFile(absB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := os.ReadFile(absA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Error("a alteração no meio do arquivo sobreviveu ao resync: os lados seguem divergentes")
+	}
+}
+
+// A contrapartida: mtimes iguais e digest amostrado igual continuam sendo
+// tratados como convergidos, senão todo resync retransferiria os arquivos
+// grandes sem motivo.
+func TestSampledDigestWithEqualMtimeIsNoop(t *testing.T) {
+	eng, cfg, _ := newIdleEngine(t, func(c *config.Config) {
+		c.HashMaxBytes = 8 << 10
+		c.HashSampleBytes = 1 << 10
+	})
+	ctx := context.Background()
+
+	rel := "grande.bin"
+	absA, absB := filepath.Join(cfg.A, rel), filepath.Join(cfg.B, rel)
+	buf := make([]byte, 64<<10)
+	for _, p := range []string{absA, absB} {
+		if err := os.WriteFile(p, buf, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	when := time.Unix(1_700_000_000, 0)
+	for _, p := range []string{absA, absB} {
+		if err := os.Chtimes(p, when, when); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := eng.recordPair(ctx, rel, absA, absB, false); err != nil {
+		t.Fatal(err)
+	}
+
+	before, err := os.Stat(absB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := eng.reconcile(ctx, "teste", "."); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.Stat(absB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !before.ModTime().Equal(after.ModTime()) {
+		t.Error("arquivo convergido foi retransferido sem motivo")
+	}
+}
+
+// Alterar o meio de um arquivo grande em UM lado só é alteração unilateral,
+// não conflito. Sem o mtime como segunda evidência, originOf não conseguia
+// atribuir origem — os digests amostrados eram iguais aos gravados dos dois
+// lados — e o caso caía na política de conflito sem necessidade.
+func TestMiddleChangeInLargeFileIsNotAConflict(t *testing.T) {
+	eng, cfg, db := newIdleEngine(t, func(c *config.Config) {
+		c.HashMaxBytes = 8 << 10
+		c.HashSampleBytes = 1 << 10
+	})
+	ctx := context.Background()
+
+	rel := "grande.bin"
+	absA, absB := filepath.Join(cfg.A, rel), filepath.Join(cfg.B, rel)
+	buf := make([]byte, 64<<10)
+	for _, p := range []string{absA, absB} {
+		if err := os.WriteFile(p, buf, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	synced := time.Now().Add(-time.Hour)
+	for _, p := range []string{absA, absB} {
+		if err := os.Chtimes(p, synced, synced); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := eng.recordPair(ctx, rel, absA, absB, false); err != nil {
+		t.Fatal(err)
+	}
+
+	f, err := os.OpenFile(absA, os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteAt([]byte("ALTERADO"), 32<<10); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	edited := synced.Add(30 * time.Minute)
+	if err := os.Chtimes(absA, edited, edited); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := eng.reconcile(ctx, "teste", "."); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := os.ReadFile(absB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := os.ReadFile(absA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Error("a alteração não foi propagada")
+	}
+
+	conflicts, err := db.UnresolvedConflicts(ctx, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(conflicts) != 0 {
+		t.Errorf("alteração unilateral virou conflito: %v", conflicts)
+	}
+	if p := findByFragment(t, cfg.B, ".sync-conflict-"); p != "" {
+		t.Errorf("arquivo de conflito criado sem necessidade: %s", p)
 	}
 }
