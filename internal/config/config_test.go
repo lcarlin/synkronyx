@@ -238,3 +238,9 @@ func TestDefaultSelfWriteTTL(t *testing.T) {
 		t.Errorf("SelfWriteTTL padrão = %s, quero 60s", got)
 	}
 }
+
+func TestDefaultHeartbeatInterval(t *testing.T) {
+	if got := Default().HeartbeatInterval; got != 15*time.Second {
+		t.Errorf("HeartbeatInterval padrão = %s, quero 15s", got)
+	}
+}

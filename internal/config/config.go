@@ -158,7 +158,7 @@ func Default() Config {
 		RetryInitialDelay: 2 * time.Second,
 		RetryMaxDelay:     5 * time.Minute,
 
-		HeartbeatInterval: 30 * time.Second,
+		HeartbeatInterval: 15 * time.Second,
 
 		SpecialFiles:     SpecialFilesSkip,
 		SyncWorkers:      4,

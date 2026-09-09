@@ -92,8 +92,9 @@ retry_max_delay: 5m
 
 # Periodicidade com que o daemon publica seu estado no banco, para o
 # `synkronyx -status` conseguir reportá-lo sem falar com o processo. É também
-# o ritmo em que os pedidos de `-resolve` são aplicados.
-heartbeat_interval: 30s
+# o ritmo em que os pedidos de `-resolve` são aplicados, e a base do prazo a
+# partir do qual o daemon é dado como parado (três intervalos sem heartbeat).
+heartbeat_interval: 15s
 
 # Sockets, FIFOs e device nodes não têm conteúdo que faça sentido copiar: um
 # socket copiado é um arquivo inerte, um FIFO copiado é um FIFO vazio.
