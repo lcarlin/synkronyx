@@ -162,7 +162,7 @@ func Default() Config {
 
 		SpecialFiles:     SpecialFilesSkip,
 		SyncWorkers:      4,
-		ProgressInterval: 15 * time.Second,
+		ProgressInterval: 30 * time.Second,
 	}
 }
 

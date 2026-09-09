@@ -244,3 +244,9 @@ func TestDefaultHeartbeatInterval(t *testing.T) {
 		t.Errorf("HeartbeatInterval padrão = %s, quero 15s", got)
 	}
 }
+
+func TestDefaultProgressInterval(t *testing.T) {
+	if got := Default().ProgressInterval; got != 30*time.Second {
+		t.Errorf("ProgressInterval padrão = %s, quero 30s", got)
+	}
+}

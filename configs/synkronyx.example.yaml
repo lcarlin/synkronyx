@@ -115,4 +115,4 @@ sync_workers: 4
 # De quanto em quanto tempo um scan ou reconciliação longa reporta progresso.
 # 0 desliga. Em árvores grandes é a diferença entre "está trabalhando" e
 # "parece travado".
-progress_interval: 15s
+progress_interval: 30s
