@@ -279,3 +279,9 @@ func TestDefaultRetryMaxDelay(t *testing.T) {
 		t.Errorf("RetryMaxDelay padrão = %s, quero 10m", got)
 	}
 }
+
+func TestDefaultLogLevel(t *testing.T) {
+	if got := Default().LogLevel; got != "debug" {
+		t.Errorf("LogLevel padrão = %q, quero \"debug\"", got)
+	}
+}
