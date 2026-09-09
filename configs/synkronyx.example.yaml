@@ -55,13 +55,13 @@ rsync_args:
 
 # debug | info | warn | error
 #
-# Em debug o daemon registra também cada eco descartado pelo guard, cada
-# evento já refletido no estado e cada varredura do guard. É o que se quer
-# para entender o comportamento do sistema, e é volumoso: medido em 50
-# arquivos propagados, debug rende ~485 bytes de log por arquivo contra ~135
-# em info, ou seja 3,6x. Em árvores com muita escrita, vale conferir o espaço
-# do journal antes de deixar assim em produção.
-log_level: debug
+# Em debug entram também os ecos descartados pelo guard, os eventos já
+# refletidos no estado e as varreduras periódicas — útil para investigar por
+# que o sistema fez o que fez, e volumoso: medido em 50 arquivos propagados,
+# debug rende ~485 bytes de log por arquivo contra ~135 em info, ou seja 3,6x.
+# Ligue quando precisar investigar; em árvores com muita escrita, confira o
+# espaço do journal antes de deixar ligado.
+log_level: info
 
 # Acima deste tamanho o digest passa a ser amostrado em vez de completo:
 # tamanho + os primeiros e os últimos hash_sample_bytes.

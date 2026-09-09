@@ -281,7 +281,7 @@ func TestDefaultRetryMaxDelay(t *testing.T) {
 }
 
 func TestDefaultLogLevel(t *testing.T) {
-	if got := Default().LogLevel; got != "debug" {
-		t.Errorf("LogLevel padrão = %q, quero \"debug\"", got)
+	if got := Default().LogLevel; got != "info" {
+		t.Errorf("LogLevel padrão = %q, quero \"info\"", got)
 	}
 }

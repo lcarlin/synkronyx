@@ -161,7 +161,7 @@ func Default() Config {
 		FirstSyncPolicy: FirstSyncUnion,
 		RsyncPath:       "rsync",
 		RsyncArgs:       []string{"--archive", "--partial", "--inplace", "--numeric-ids"},
-		LogLevel:        "debug",
+		LogLevel:        "info",
 		Exclude:         []string{".synkronyx", ".synkronyx-tmp-*", "*.sync-conflict-*"},
 
 		HashMaxBytes:      DefaultHashMaxBytes,
