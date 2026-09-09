@@ -33,9 +33,13 @@ O binário é único e sem dependências de runtime além do `rsync`.
 
 ```bash
 cp configs/synkronyx.example.yaml /etc/synkronyx/synkronyx.yaml
-$EDITOR /etc/synkronyx/synkronyx.yaml          # definir a e b
+mkdir -p /dados/A /dados/B                     # as raízes configuradas
 synkronyx -config /etc/synkronyx/synkronyx.yaml -check
 ```
+
+O `-check` recusa com mensagem nomeando cada raiz que não existir ou não for
+acessível, e o serviço faz a mesma verificação na subida — falhar antes de
+começar é melhor que falhar na primeira sincronização.
 
 Instalação como serviço:
 

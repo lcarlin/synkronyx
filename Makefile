@@ -36,11 +36,26 @@ install: build
 	install -Dm0640 configs/synkronyx.example.yaml $(DESTDIR)/etc/synkronyx/synkronyx.example.yaml
 	@echo
 	@echo "Instalado. Próximos passos:"
-	@echo "  1. cp /etc/synkronyx/synkronyx.example.yaml /etc/synkronyx/synkronyx.yaml e editar A e B"
-	@echo "  2. ajustar ReadWritePaths em /etc/systemd/system/synkronyx.service"
-	@echo "  3. systemd-sysusers && sysctl --system && systemctl daemon-reload"
-	@echo "  4. synkronyx -config /etc/synkronyx/synkronyx.yaml -check"
-	@echo "  5. systemctl enable --now synkronyx"
+	@echo
+	@echo "  1. Configuração (as raízes /dados/A e /dados/B já vêm definidas):"
+	@echo "       cp /etc/synkronyx/synkronyx.example.yaml /etc/synkronyx/synkronyx.yaml"
+	@echo
+	@echo "  2. Criar as raízes e dar acesso ao usuário do serviço."
+	@echo "     O install não faz isso: são seus dados, e a escolha de dono e"
+	@echo "     modo depende de quem mais precisa acessá-los."
+	@echo "       mkdir -p /dados/A /dados/B"
+	@echo "       chown synkronyx:synkronyx /dados/A /dados/B   # se usar o unit padrão"
+	@echo
+	@echo "  3. Usuário do serviço e limites do inotify:"
+	@echo "       systemd-sysusers && sysctl --system && systemctl daemon-reload"
+	@echo
+	@echo "  4. Validar antes de habilitar — recusa com mensagem clara se as"
+	@echo "     raízes não existirem ou não forem acessíveis:"
+	@echo "       synkronyx -config /etc/synkronyx/synkronyx.yaml -check"
+	@echo
+	@echo "  5. Habilitar. Use UM dos dois units, nunca ambos:"
+	@echo "       systemctl enable --now synkronyx        # sem privilégio, sem dono/grupo"
+	@echo "       systemctl enable --now synkronyx-root   # com dono e grupo sincronizados"
 
 uninstall:
 	rm -f $(DESTDIR)$(PREFIX)/bin/$(BINARY)
