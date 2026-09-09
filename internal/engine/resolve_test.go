@@ -315,3 +315,146 @@ func TestResolveTransfersWhenSizeAndMtimeMatch(t *testing.T) {
 		t.Errorf("A = %q, quero \"BBB\"", got)
 	}
 }
+
+// TestReconcileUnilateralChangeIsNotAConflict é regressão de um caso em que a
+// reconciliação transformava toda edição feita com o serviço parado num
+// arquivo .sync-conflict-.
+//
+// Conflito, pela seção 9 do escopo, é a ausência de origem única. Conteúdos
+// diferentes não bastam: se só um lado se afastou do que foi sincronizado por
+// último, aquele lado É a origem.
+func TestReconcileUnilateralChangeIsNotAConflict(t *testing.T) {
+	eng, cfg, db := newIdleEngine(t, nil)
+	ctx := context.Background()
+
+	rel := "d.txt"
+	absA, absB := filepath.Join(cfg.A, rel), filepath.Join(cfg.B, rel)
+	for _, p := range []string{absA, absB} {
+		if err := os.WriteFile(p, []byte("versão sincronizada"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Linha de base: os dois lados registrados como sincronizados.
+	if err := eng.recordPair(ctx, rel, absA, absB, false); err != nil {
+		t.Fatal(err)
+	}
+
+	// Só A muda.
+	if err := os.WriteFile(absA, []byte("editado apenas em A"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := eng.reconcile(ctx, "teste", "."); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := os.ReadFile(absB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "editado apenas em A" {
+		t.Errorf("B = %q, quero a versão de A propagada", got)
+	}
+
+	conflicts, err := db.UnresolvedConflicts(ctx, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(conflicts) != 0 {
+		t.Errorf("alteração unilateral virou conflito: %v", conflicts)
+	}
+	if p := findByFragment(t, cfg.B, ".sync-conflict-"); p != "" {
+		t.Errorf("arquivo de conflito criado sem necessidade: %s", p)
+	}
+}
+
+// A simetria precisa valer: só B mudar também tem origem única.
+func TestReconcileUnilateralChangeFromB(t *testing.T) {
+	eng, cfg, _ := newIdleEngine(t, nil)
+	ctx := context.Background()
+
+	rel := "d.txt"
+	absA, absB := filepath.Join(cfg.A, rel), filepath.Join(cfg.B, rel)
+	for _, p := range []string{absA, absB} {
+		if err := os.WriteFile(p, []byte("base"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := eng.recordPair(ctx, rel, absA, absB, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(absB, []byte("editado apenas em B"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := eng.reconcile(ctx, "teste", "."); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(absA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "editado apenas em B" {
+		t.Errorf("A = %q, quero a versão de B propagada", got)
+	}
+}
+
+// Quando os DOIS lados mudaram, aí sim não há origem única e o conflito é o
+// desfecho correto.
+func TestReconcileBilateralChangeIsAConflict(t *testing.T) {
+	eng, cfg, db := newIdleEngine(t, nil)
+	ctx := context.Background()
+
+	rel := "d.txt"
+	absA, absB := filepath.Join(cfg.A, rel), filepath.Join(cfg.B, rel)
+	for _, p := range []string{absA, absB} {
+		if err := os.WriteFile(p, []byte("base"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := eng.recordPair(ctx, rel, absA, absB, false); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.WriteFile(absA, []byte("editado em A"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(absB, []byte("editado em B, diferente"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := eng.reconcile(ctx, "teste", "."); err != nil {
+		t.Fatal(err)
+	}
+
+	// A política padrão preserva, então o conflito consta como resolvido, mas
+	// alguma versão precisa ter sido posta de lado.
+	preserved := findByFragment(t, cfg.A, ".sync-conflict-") + findByFragment(t, cfg.B, ".sync-conflict-")
+	if preserved == "" {
+		t.Error("alteração bilateral não preservou nenhuma versão")
+	}
+	_ = db
+}
+
+// Sem linha de base no estado não há como afirmar quem é a origem, e o
+// conservador é tratar como conflito.
+func TestReconcileWithoutBaselineIsAConflict(t *testing.T) {
+	eng, cfg, _ := newIdleEngine(t, nil)
+	ctx := context.Background()
+
+	rel := "d.txt"
+	if err := os.WriteFile(filepath.Join(cfg.A, rel), []byte("de A"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cfg.B, rel), []byte("de B, distinto"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := eng.reconcile(ctx, "teste", "."); err != nil {
+		t.Fatal(err)
+	}
+	preserved := findByFragment(t, cfg.A, ".sync-conflict-") + findByFragment(t, cfg.B, ".sync-conflict-")
+	if preserved == "" {
+		t.Error("par sem linha de base deveria ter sido tratado como conflito")
+	}
+}

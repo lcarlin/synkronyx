@@ -284,7 +284,13 @@ func (e *Engine) scanBothSides(ctx context.Context, phase, scope string,
 
 // comparison é o resultado pré-calculado da comparação de um path presente
 // nos dois lados.
+//
+// Carrega os digests, e não só o veredito, porque a fase sequencial precisa
+// deles para descobrir QUAL lado mudou — e recalculá-los ali desfaria o
+// ganho de ter comparado em paralelo.
 type comparison struct {
+	digestA hash.Digest
+	digestB hash.Digest
 	differs bool
 	err     error
 	known   bool
@@ -333,9 +339,12 @@ func (e *Engine) compareInParallel(ctx context.Context, invA, invB scan.Inventor
 		go func() {
 			defer wg.Done()
 			for j := range next {
-				differs, err := e.contentDiffers(j.absA, j.absB)
+				differs, dA, dB, err := e.compareContent(j.absA, j.absB)
 				mu.Lock()
-				out[j.rel] = comparison{differs: differs, err: err, known: true}
+				out[j.rel] = comparison{
+					digestA: dA, digestB: dB,
+					differs: differs, err: err, known: true,
+				}
 				mu.Unlock()
 			}
 		}()
@@ -507,7 +516,7 @@ func (e *Engine) reconcileBothSides(ctx context.Context, rel string, stA, stB ha
 
 	differs, err := cmp.differs, cmp.err
 	if !cmp.known {
-		differs, err = e.contentDiffers(absA, absB)
+		differs, cmp.digestA, cmp.digestB, err = e.compareContent(absA, absB)
 	}
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -530,8 +539,26 @@ func (e *Engine) reconcileBothSides(ctx context.Context, rel string, stA, stB ha
 		return reconcileApplied, e.propagateContent(ctx, ev, absB, absA)
 
 	default:
-		// União com conteúdos divergentes é exatamente o caso da seção 9:
-		// não há origem única. Delega para a política de conflito.
+		// Conteúdos divergentes NÃO implicam conflito. O que caracteriza
+		// conflito, pela seção 9, é não haver origem única — e o estado sabe
+		// dizer se há: se apenas um dos lados se afastou do que foi
+		// sincronizado por último, aquele lado é a origem, e o caso é uma
+		// alteração unilateral comum.
+		//
+		// Consultar o estado aqui é o que evita que toda edição feita com o
+		// serviço parado vire um arquivo .sync-conflict- sem motivo.
+		origin, decided, err := e.originOf(ctx, rel, cmp)
+		if err != nil {
+			return reconcileNoop, err
+		}
+		if decided {
+			ev := event.Event{Side: origin, Kind: event.KindModify, Path: rel, At: time.Now()}
+			return reconcileApplied, e.propagateContent(ctx, ev,
+				e.abs(origin, rel), e.abs(origin.Opposite(), rel))
+		}
+
+		// Sem origem única: os dois lados mudaram, ou não há estado que
+		// permita afirmar qual mudou. Delega para a política de conflito.
 		src := event.SideA
 		if stB.MTime.After(stA.MTime) {
 			src = event.SideB
@@ -541,5 +568,40 @@ func (e *Engine) reconcileBothSides(ctx context.Context, rel string, stA, stB ha
 			return reconcileConflict, err
 		}
 		return reconcileConflict, nil
+	}
+}
+
+// originOf descobre qual lado se afastou do último estado sincronizado.
+//
+// Devolve (lado, true) quando exatamente um dos lados mudou — há origem
+// única, e a alteração deve ser propagada como qualquer outra. Devolve
+// (_, false) quando os dois mudaram, quando nenhum mudou (estado
+// inconsistente com o disco) ou quando não há estado para comparar: nesses
+// casos ninguém pode afirmar de onde veio a versão boa, e a decisão cabe à
+// política de conflito.
+func (e *Engine) originOf(ctx context.Context, rel string, cmp comparison) (event.Side, bool, error) {
+	entryA, err := e.db.Get(ctx, event.SideA, rel)
+	if err != nil {
+		return event.SideA, false, err
+	}
+	entryB, err := e.db.Get(ctx, event.SideB, rel)
+	if err != nil {
+		return event.SideA, false, err
+	}
+	if entryA == nil || entryB == nil {
+		// Par nunca sincronizado: não há linha de base.
+		return event.SideA, false, nil
+	}
+
+	changedA := hash.Compare(cmp.digestA, entryA.Digest) != hash.Same
+	changedB := hash.Compare(cmp.digestB, entryB.Digest) != hash.Same
+
+	switch {
+	case changedA && !changedB:
+		return event.SideA, true, nil
+	case changedB && !changedA:
+		return event.SideB, true, nil
+	default:
+		return event.SideA, false, nil
 	}
 }

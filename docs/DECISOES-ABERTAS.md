@@ -116,6 +116,22 @@ põe de lado o que o estado não conhece — criado ali e nunca propagado, ou
 alterado ali depois da última sincronização. Vai para
 `<dir>.sync-conflict-<lado>-<data>/`, que o exclude ignora.
 
+### Conflito é ausência de origem, não diferença de conteúdo
+
+A reconciliação consulta o estado antes de declarar conflito. Se apenas um dos
+lados se afastou do que foi sincronizado por último, aquele lado é a origem e a
+alteração é propagada como qualquer outra. Conflito fica reservado para quando
+os dois mudaram, ou quando não há linha de base que permita afirmar qual mudou.
+
+Isso parece óbvio e não estava implementado: a reconciliação ia direto de
+"conteúdos diferem" para a política de conflito, com o comentário afirmando que
+não havia origem única sem nunca consultar o estado, que tinha exatamente essa
+informação. Na prática, toda edição feita com o serviço parado virava um
+arquivo `.sync-conflict-` sem motivo.
+
+O caminho de eventos já fazia a checagem certa, em `detectConflict`. Era a
+reconciliação que a perdia.
+
 ### Estado perdido
 
 Detectado e avisado, com a condição precisa: banco vazio **e** First Sync já

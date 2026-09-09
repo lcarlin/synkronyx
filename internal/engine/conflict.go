@@ -58,33 +58,40 @@ func (e *Engine) detectConflict(ctx context.Context, ev event.Event, srcAbs, dst
 }
 
 func (e *Engine) contentDiffers(srcAbs, dstAbs string) (bool, error) {
+	differs, _, _, err := e.compareContent(srcAbs, dstAbs)
+	return differs, err
+}
+
+// compareContent devolve, além do veredito, os digests calculados — para que
+// quem precise deles não pague o cálculo duas vezes.
+func (e *Engine) compareContent(srcAbs, dstAbs string) (bool, hash.Digest, hash.Digest, error) {
 	srcDigest, err := e.digestOf(srcAbs)
 	if err != nil {
-		return false, err
+		return false, hash.Digest{}, hash.Digest{}, err
 	}
 	dstDigest, err := e.digestOf(dstAbs)
 	if err != nil {
-		return false, err
+		return false, hash.Digest{}, hash.Digest{}, err
 	}
 
 	switch hash.Compare(srcDigest, dstDigest) {
 	case hash.Same:
-		return false, nil
+		return false, srcDigest, dstDigest, nil
 	case hash.Different:
-		return true, nil
+		return true, srcDigest, dstDigest, nil
 	default:
 		// Sem digest de algum dos lados (diretório, ou falha de leitura já
 		// tratada acima). Tamanho é o que resta, e diferença de tamanho
 		// prova diferença de conteúdo.
 		srcStat, err := hash.StatOf(srcAbs)
 		if err != nil {
-			return false, err
+			return false, srcDigest, dstDigest, err
 		}
 		dstStat, err := hash.StatOf(dstAbs)
 		if err != nil {
-			return false, err
+			return false, srcDigest, dstDigest, err
 		}
-		return srcStat.Size != dstStat.Size, nil
+		return srcStat.Size != dstStat.Size, srcDigest, dstDigest, nil
 	}
 }
 
