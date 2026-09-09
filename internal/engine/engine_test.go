@@ -617,3 +617,22 @@ func TestPreservePolicyKeepsFileOnBothSides(t *testing.T) {
 		t.Error("nenhuma versão preservada; a política preserve não cumpriu o que promete")
 	}
 }
+
+// O caminho estritamente sequencial precisa continuar funcionando: é o que
+// alguém escolhe para depurar, e desde que o padrão passou a ser 4 nenhum
+// outro teste o exercitava.
+func TestSequentialWorkerStillPropagates(t *testing.T) {
+	h := newHarness(t, func(c *config.Config) {
+		c.SyncWorkers = 1
+	})
+
+	if err := os.WriteFile(filepath.Join(h.A, "de-a.txt"), []byte("A"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	waitContent(t, filepath.Join(h.B, "de-a.txt"), "A")
+
+	if err := os.WriteFile(filepath.Join(h.B, "de-b.txt"), []byte("B"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	waitContent(t, filepath.Join(h.A, "de-b.txt"), "B")
+}

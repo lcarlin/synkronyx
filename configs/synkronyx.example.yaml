@@ -101,7 +101,7 @@ special_files: skip
 # por uma barreira que espera todos os workers ficarem ociosos.
 #
 # 1 mantém o processamento estritamente sequencial.
-sync_workers: 1
+sync_workers: 4
 
 # De quanto em quanto tempo um scan ou reconciliação longa reporta progresso.
 # 0 desliga. Em árvores grandes é a diferença entre "está trabalhando" e

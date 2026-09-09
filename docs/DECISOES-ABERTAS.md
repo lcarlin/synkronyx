@@ -169,11 +169,16 @@ particionado por subárvore de primeiro nível — o que preserva a ordem dentro
 de cada subárvore, a única que importa. Renames entre subárvores passam por
 uma barreira que espera todos os workers ficarem ociosos.
 
-**Escolha aceita:** o padrão é `1`. O paralelismo é correto por construção e
-testado (`TestDispatchPreservesOrderWithinSubtree`,
-`TestDispatchBarrierDrainsWorkers`), mas num daemon que escreve nos dados de
-alguém a opção conservadora é o padrão, e subir o número é decisão de quem
-conhece a carga.
+**Escolha:** o padrão é `4`. A ordem dentro de cada subárvore é garantida pelo
+particionamento e coberta por teste (`TestDispatchPreservesOrderWithinSubtree`,
+`TestDispatchBarrierDrainsWorkers`), então o paralelismo não muda o resultado,
+só o tempo — e o gargalo real é I/O, que se beneficia de várias transferências
+simultâneas.
+
+O padrão foi `1` durante o desenvolvimento, por conservadorismo enquanto o
+particionamento era novo. `sync_workers: 1` continua disponível para quem
+quiser o comportamento estritamente sequencial, seja para depurar ou por
+preferência.
 
 ---
 

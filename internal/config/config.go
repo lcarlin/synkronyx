@@ -161,7 +161,7 @@ func Default() Config {
 		HeartbeatInterval: 30 * time.Second,
 
 		SpecialFiles:     SpecialFilesSkip,
-		SyncWorkers:      1,
+		SyncWorkers:      4,
 		ProgressInterval: 15 * time.Second,
 	}
 }

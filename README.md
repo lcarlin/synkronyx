@@ -159,8 +159,9 @@ tudo abaixo dele caiam sempre no mesmo worker, preservando a ordem relativa
 dentro da subárvore — a única ordem que importa. Renames entre subárvores
 passam por uma barreira que espera todos os workers ficarem ociosos.
 
-O padrão é `1`. Num daemon que escreve nos dados de alguém, a opção
-conservadora é o padrão.
+O padrão é `4`. A ordenação dentro de cada subárvore é garantida por
+construção e coberta por teste, então o paralelismo não muda o resultado — só
+o tempo. `1` volta ao processamento estritamente sequencial.
 
 A reconciliação usa outra estratégia: scan das duas árvores em paralelo,
 comparação de conteúdo em paralelo (fase cara e puramente leitura) e aplicação

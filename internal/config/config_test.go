@@ -194,3 +194,29 @@ func TestExampleConfigIsValid(t *testing.T) {
 		t.Fatalf("configs/synkronyx.example.yaml não passa na validação: %v", err)
 	}
 }
+
+// O padrão de sync_workers é uma decisão de projeto, não um detalhe: fixá-lo
+// em teste faz uma mudança acidental aparecer no diff.
+func TestDefaultSyncWorkers(t *testing.T) {
+	if got := Default().SyncWorkers; got != 4 {
+		t.Errorf("SyncWorkers padrão = %d, quero 4", got)
+	}
+}
+
+func TestValidateRejectsZeroWorkers(t *testing.T) {
+	dir := t.TempDir()
+	a, b := filepath.Join(dir, "A"), filepath.Join(dir, "B")
+	for _, p := range []string{a, b} {
+		if err := os.MkdirAll(p, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	cfg := Default()
+	cfg.A, cfg.B = a, b
+	cfg.SyncWorkers = 0
+
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("Validate() aceitou sync_workers = 0")
+	}
+}
