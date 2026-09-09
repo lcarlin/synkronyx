@@ -49,8 +49,17 @@ type Engine struct {
 	watchers map[event.Side]*watcher.Watcher
 	roots    map[event.Side]string
 
-	resync chan string // pedidos de Full Resync, com o motivo
-	fatal  chan error  // falhas que exigem encerrar o serviço
+	resync chan string  // pedidos de Full Resync, com o motivo
+	fatal  chan error   // falhas que exigem encerrar o serviço
+	failed chan failure // falhas de propagação, vindas dos workers
+}
+
+// failure é uma propagação que não deu certo. Trafega dos workers para o loop
+// principal, que é o único a mexer na fila de retry — assim ela continua
+// sendo estado de uma goroutine só, sem precisar de trava.
+type failure struct {
+	ev  event.Event
+	err error
 }
 
 // New monta o engine. Não toca em disco nem sobe watchers — isso é Run.
@@ -67,6 +76,7 @@ func New(cfg config.Config, db *state.DB, log *slog.Logger) *Engine {
 		roots:    map[event.Side]string{event.SideA: cfg.A, event.SideB: cfg.B},
 		resync:   make(chan string, 1),
 		fatal:    make(chan error, 2),
+		failed:   make(chan failure, 256),
 	}
 }
 
@@ -79,6 +89,7 @@ func (e *Engine) Run(ctx context.Context) error {
 	if err := e.xfer.Check(ctx); err != nil {
 		return err
 	}
+	e.runPreflight(ctx)
 
 	excluder := config.NewExcluder(e.cfg.Exclude)
 	for side, root := range e.roots {
@@ -99,6 +110,7 @@ func (e *Engine) Run(ctx context.Context) error {
 		go e.pump(ctx, w)
 		go e.watchSignals(ctx, side, w)
 	}
+	e.checkWatchPressure()
 
 	if err := e.firstSync(ctx); err != nil {
 		return fmt.Errorf("first sync: %w", err)
@@ -164,6 +176,19 @@ func (e *Engine) loop(ctx context.Context) error {
 	retryT := time.NewTicker(retryTick)
 	defer retryT.Stop()
 
+	fail := func(ev event.Event, err error) {
+		select {
+		case e.failed <- failure{ev: ev, err: err}:
+		case <-ctx.Done():
+		}
+	}
+	disp := newDispatcher(ctx, e.cfg.SyncWorkers, e.process, fail)
+	defer disp.close()
+	if e.cfg.SyncWorkers > 1 {
+		e.log.Info("processamento paralelo ativo",
+			"workers", e.cfg.SyncWorkers, "particao", "subárvore de primeiro nível")
+	}
+
 	e.heartbeat(ctx)
 
 	for {
@@ -186,22 +211,33 @@ func (e *Engine) loop(ctx context.Context) error {
 			// Um evento novo torna irrelevante qualquer tentativa pendente
 			// para o mesmo path.
 			e.retry.cancel(ev.Side, ev.Path)
-			if err := e.process(ctx, ev); err != nil {
-				e.handleFailure(ctx, ev, err)
-				continue
-			}
+			disp.dispatch(ctx, ev, e.process, fail)
+
+		case f := <-e.failed:
+			e.handleFailure(ctx, f.ev, f.err)
 
 		case reason := <-e.resync:
 			e.log.Warn("full resync solicitado", "reason", reason)
+			// O resync reconcilia as duas árvores inteiras; deixá-lo correr
+			// junto com os workers seria duas decisões simultâneas sobre o
+			// mesmo path.
+			disp.inflight.Wait()
 			if err := e.FullResync(ctx); err != nil {
 				e.log.Error("full resync falhou", "err", err)
 			}
 
 		case now := <-retryT.C:
-			e.processRetries(ctx, now)
+			e.processRetries(ctx, now, disp, fail)
 
 		case <-beat.C:
 			e.heartbeat(ctx)
+			e.checkWatchPressure()
+			// Resoluções pedidas pelo CLI são aplicadas aqui, com o guard em
+			// mãos: aplicá-las de fora do processo faria os eventos
+			// resultantes serem lidos como alteração externa e desfazerem a
+			// própria resolução.
+			disp.inflight.Wait()
+			e.applyPendingResolutions(ctx)
 
 		case <-sweep.C:
 			if n := e.guard.Sweep(); n > 0 {
@@ -233,14 +269,12 @@ func (e *Engine) handleFailure(ctx context.Context, ev event.Event, cause error)
 	e.RequestResync("tentativas esgotadas para " + ev.Path)
 }
 
-func (e *Engine) processRetries(ctx context.Context, now time.Time) {
+func (e *Engine) processRetries(ctx context.Context, now time.Time,
+	disp *dispatcher, fail func(event.Event, error)) {
+
 	for _, it := range e.retry.due(now) {
 		e.log.Info("retentando", "event", it.ev.String(), "tentativa", it.attempts)
-		if err := e.process(ctx, it.ev); err != nil {
-			e.handleFailure(ctx, it.ev, err)
-			continue
-		}
-		e.log.Info("retentativa bem-sucedida", "event", it.ev.String(), "tentativas", it.attempts)
+		disp.dispatch(ctx, it.ev, e.process, fail)
 	}
 }
 
@@ -282,6 +316,13 @@ func (e *Engine) process(ctx context.Context, ev event.Event) error {
 	} else if noop {
 		e.log.Debug("evento já refletido no estado; ignorado", "event", ev.String())
 		return nil
+	}
+
+	// Arquivos especiais não são sincronizáveis; ver engine.skipSpecial.
+	if ev.Kind != event.KindDelete {
+		if st, err := hash.StatOf(srcAbs); err == nil && e.skipSpecial(ev.Path, st.Kind, e.log) {
+			return nil
+		}
 	}
 
 	e.log.Info("propagando", "event", ev.String(), "para", dst.String())

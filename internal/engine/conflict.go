@@ -153,15 +153,27 @@ func (e *Engine) resolveConflict(ctx context.Context, ev event.Event, srcAbs, ds
 		return e.recordPair(ctx, ev.Path, srcAbs, dstAbs, false)
 
 	default: // ConflictPreserve
-		// A versão do destino é renomeada para um nome de conflito e a da
-		// origem é copiada por cima. Nada é perdido: as duas continuam no
-		// disco, e o rename é local, sem transferência.
+		// A versão do destino é copiada para um nome de conflito e a da
+		// origem é escrita por cima do path original. Nada é perdido: as duas
+		// continuam no disco.
+		//
+		// Copiar, e não renomear, é deliberado, e custou um bug para ficar
+		// claro. Um rename emite MOVED_FROM no path original e MOVED_TO no
+		// nome preservado; o segundo é descartado pelo watcher, porque o nome
+		// preservado casa com o exclude. Sobra um MOVED_FROM órfão, que só
+		// pode ser lido como remoção — e essa remoção era propagada de volta,
+		// apagando justamente a versão vencedora do outro lado.
+		//
+		// Tentar cobrir o caso contando eventos não resolve: o rsync emite um
+		// número variável de ATTRIB, e qualquer contagem fixa erra. Copiando,
+		// o evento perigoso simplesmente não existe — o path original nunca
+		// deixa de existir, e o rsync sobrescreve no lugar.
 		preserved := conflictName(ev.Path, dstSide, time.Now())
 		preservedAbs := e.abs(dstSide, preserved)
 
-		e.guard.Expect(dstSide, preserved, 2)
-		if err := e.xfer.Move(dstAbs, preservedAbs); err != nil {
-			e.guard.Forget(dstSide, preserved)
+		e.guard.ExpectSubtree(dstSide, preserved)
+		if err := e.xfer.CopyFile(ctx, dstAbs, preservedAbs); err != nil {
+			e.guard.ForgetSubtree(dstSide, preserved)
 			return fmt.Errorf("preservando versão em conflito: %w", err)
 		}
 		e.log.Warn("versão preservada", "original", ev.Path, "preservada", preserved)

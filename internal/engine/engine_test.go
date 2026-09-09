@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/lcarlin/synkronyx/internal/config"
 	"github.com/lcarlin/synkronyx/internal/event"
+	"github.com/lcarlin/synkronyx/internal/hash"
 	"github.com/lcarlin/synkronyx/internal/state"
 )
 
@@ -442,5 +444,176 @@ func TestEngineStopsWhenRootDisappears(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("Run não encerrou após a raiz sumir")
+	}
+}
+
+// Com vários workers, eventos em subárvores distintas são processados em
+// paralelo — sem trocar ordem dentro de cada subárvore nem perder nada.
+func TestParallelWorkersPropagateEverything(t *testing.T) {
+	h := newHarness(t, func(c *config.Config) {
+		c.SyncWorkers = 4
+	})
+
+	const subtrees, filesPer = 6, 8
+	for s := range subtrees {
+		dir := filepath.Join(h.A, fmt.Sprintf("sub%d", s))
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		for f := range filesPer {
+			name := filepath.Join(dir, fmt.Sprintf("f%d.txt", f))
+			if err := os.WriteFile(name, []byte(fmt.Sprintf("%d-%d", s, f)), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+
+	for s := range subtrees {
+		for f := range filesPer {
+			want := fmt.Sprintf("%d-%d", s, f)
+			waitContent(t, filepath.Join(h.B, fmt.Sprintf("sub%d", s), fmt.Sprintf("f%d.txt", f)), want)
+		}
+	}
+	assertNoConflictFiles(t, h.A)
+	assertNoConflictFiles(t, h.B)
+}
+
+// Rename entre subárvores de primeiro nível é o caso que exige barreira no
+// dispatcher; precisa funcionar igual ao caminho sequencial.
+func TestParallelCrossSubtreeRename(t *testing.T) {
+	h := newHarness(t, func(c *config.Config) {
+		c.SyncWorkers = 4
+	})
+
+	for _, d := range []string{"origem", "destino"} {
+		if err := os.MkdirAll(filepath.Join(h.A, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	src := filepath.Join(h.A, "origem", "arquivo.txt")
+	if err := os.WriteFile(src, []byte("mudando de casa"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	waitContent(t, filepath.Join(h.B, "origem", "arquivo.txt"), "mudando de casa")
+
+	if err := os.Rename(src, filepath.Join(h.A, "destino", "arquivo.txt")); err != nil {
+		t.Fatal(err)
+	}
+	waitContent(t, filepath.Join(h.B, "destino", "arquivo.txt"), "mudando de casa")
+	waitGone(t, filepath.Join(h.B, "origem", "arquivo.txt"))
+}
+
+// O daemon aplica pedidos de resolução gravados por outro processo, no ritmo
+// do heartbeat.
+func TestDaemonAppliesQueuedResolution(t *testing.T) {
+	h := newHarness(t, func(c *config.Config) {
+		c.HeartbeatInterval = 300 * time.Millisecond
+	})
+	ctx := context.Background()
+
+	// Um conflito real: os dois lados divergem no mesmo path.
+	rel := "disputado.txt"
+	if err := os.WriteFile(filepath.Join(h.A, rel), []byte("de A"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	waitContent(t, filepath.Join(h.B, rel), "de A")
+
+	if err := h.db.RecordConflict(ctx, rel, hash.Digest{}, hash.Digest{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.db.RequestResolution(ctx, rel, "b"); err != nil {
+		t.Fatal(err)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		pending, err := h.db.PendingResolutions(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(pending) == 0 {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatal("o daemon não consumiu o pedido de resolução")
+}
+
+// TestPreservePolicyKeepsFileOnBothSides é uma regressão de um bug que só
+// aparece com os watchers rodando: preservar a versão perdedora é um rename, e
+// o MOVED_FROM do path original — cujo par MOVED_TO some porque o nome
+// preservado é excluído — chegava como DELETE e era propagado de volta,
+// apagando a versão vencedora do outro lado.
+//
+// A camada de idempotência não protege contra isso: o DELETE descreve o disco
+// corretamente. Só a expectativa registrada antes do rename resolve.
+func TestPreservePolicyKeepsFileOnBothSides(t *testing.T) {
+	if _, err := exec.LookPath("rsync"); err != nil {
+		t.Skip("rsync não disponível")
+	}
+
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.A = filepath.Join(dir, "A")
+	cfg.B = filepath.Join(dir, "B")
+	cfg.StatePath = filepath.Join(dir, "state.db")
+	cfg.Debounce = 50 * time.Millisecond
+	for _, root := range []string{cfg.A, cfg.B} {
+		if err := os.MkdirAll(root, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Divergência pré-existente: o First Sync vai tratá-la como conflito.
+	if err := os.WriteFile(filepath.Join(cfg.A, "disputado.txt"), []byte("versão de A"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cfg.B, "disputado.txt"), []byte("versão de B, diferente"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err := state.Open(cfg.StatePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	var logOut io.Writer = io.Discard
+	if testing.Verbose() {
+		logOut = os.Stderr
+	}
+	eng := New(cfg, db, slog.New(slog.NewTextHandler(logOut, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- eng.Run(ctx) }()
+	defer func() {
+		cancel()
+		<-done
+	}()
+
+	// Tempo para o first sync resolver e para qualquer eco indevido circular.
+	time.Sleep(2 * time.Second)
+
+	for _, root := range []string{cfg.A, cfg.B} {
+		if _, err := os.Stat(filepath.Join(root, "disputado.txt")); err != nil {
+			t.Errorf("%s/disputado.txt sumiu após a resolução do conflito: %v", root, err)
+		}
+	}
+
+	// E a versão perdedora continua recuperável.
+	var preserved bool
+	for _, root := range []string{cfg.A, cfg.B} {
+		entries, err := os.ReadDir(root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, e := range entries {
+			if strings.Contains(e.Name(), ".sync-conflict-") {
+				preserved = true
+			}
+		}
+	}
+	if !preserved {
+		t.Error("nenhuma versão preservada; a política preserve não cumpriu o que promete")
 	}
 }

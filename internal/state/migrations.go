@@ -7,7 +7,7 @@ import (
 
 // schemaVersion é a versão de schema que este binário espera. Guardada no
 // PRAGMA user_version do próprio arquivo SQLite.
-const schemaVersion = 2
+const schemaVersion = 3
 
 // migrations[i] leva o banco da versão i para i+1. Só se acrescenta ao fim;
 // nunca se edita uma entrada já publicada, porque bancos em produção já a
@@ -18,6 +18,18 @@ var migrations = []string{
 	// virou mentira. Os valores gravados continuam válidos: hash.ParseDigest
 	// aceita hex puro como digest completo.
 	`ALTER TABLE entries RENAME COLUMN sha256 TO digest;`,
+
+	// v2 -> v3: resolução assistida de conflitos. A tabela é o canal entre o
+	// CLI e o daemon: resolver um conflito escrevendo direto nas árvores
+	// enquanto o serviço roda dispara eventos que desfazem a resolução, então
+	// o pedido é gravado aqui e aplicado por quem tem o guard em mãos.
+	`CREATE TABLE IF NOT EXISTS resolutions (
+		path         TEXT    NOT NULL PRIMARY KEY,
+		want         TEXT    NOT NULL,
+		requested_at INTEGER NOT NULL,
+		applied_at   INTEGER,
+		error        TEXT
+	) WITHOUT ROWID;`,
 }
 
 // migrate aplica as migrações pendentes.

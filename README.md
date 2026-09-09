@@ -8,13 +8,14 @@ A especificação completa está em [SYNKRONYX-HIGH-LEVEL-SCOPE.md](SYNKRONYX-HI
 
 ## Estado atual
 
-Funcional. Propagação nos dois sentidos, rename, delete, subdiretórios, First
-Sync, Full Resync, conflitos, retry com backoff, remoção segura de diretórios
-e prevenção de loops — tudo coberto por testes de integração contra inotify e
+Funcional. Propagação nos dois sentidos, rename, delete, subdiretórios,
+symlinks, First Sync, Full Resync, conflitos com resolução assistida, retry
+com backoff, remoção segura de diretórios, processamento paralelo opcional e
+prevenção de loops — tudo coberto por testes de integração contra inotify e
 rsync reais.
 
-As limitações que sobreviveram às decisões de projeto, e o que continua em
-aberto, estão em [docs/DECISOES-ABERTAS.md](docs/DECISOES-ABERTAS.md).
+As decisões tomadas, as limitações que sobreviveram a elas e o que continua em
+aberto estão em [docs/DECISOES-ABERTAS.md](docs/DECISOES-ABERTAS.md).
 
 ## Build
 
@@ -74,6 +75,19 @@ de lá — sem socket de controle e sem protocolo novo para manter. O relatório
 é do último heartbeat, não do instante da consulta, e avisa quando o
 heartbeat está vencido.
 
+Conflitos, com contexto para decidir e comando para resolver:
+
+```bash
+synkronyx -config ... -conflicts
+synkronyx -config ... -resolve docs/relatorio.md -with a
+```
+
+Com o daemon rodando, `-resolve` grava um pedido que o daemon aplica no ritmo
+do heartbeat. Escrever direto nas árvores faria o daemon ler as escritas como
+alteração externa e propagá-las de volta, desfazendo a resolução — só quem tem
+o guard em mãos pode aplicar com segurança. Com o daemon parado, o CLI aplica
+na hora.
+
 ## Arquitetura
 
 ```text
@@ -96,6 +110,7 @@ heartbeat está vencido.
 | `internal/state` | estado persistente em SQLite (Go puro, sem CGO) |
 | `internal/transfer` | execução do rsync e operações locais de filesystem |
 | `internal/scan` | inventário das árvores para reconciliação |
+| `internal/preflight` | verificações de ambiente na subida (dono, filesystem, watches) |
 | `internal/hash` | digest de conteúdo (completo ou amostrado), com filtro barato por metadados |
 
 ### Prevenção de loops
@@ -135,6 +150,29 @@ com o valor, e comparar tipos diferentes é recusado em vez de dar uma resposta
 sem significado.
 
 O padrão é `0`: digest completo, sem pontos cegos.
+
+### Paralelismo
+
+`sync_workers` habilita processamento paralelo de eventos, particionado pelo
+primeiro componente do path. Isso garante que um diretório de primeiro nível e
+tudo abaixo dele caiam sempre no mesmo worker, preservando a ordem relativa
+dentro da subárvore — a única ordem que importa. Renames entre subárvores
+passam por uma barreira que espera todos os workers ficarem ociosos.
+
+O padrão é `1`. Num daemon que escreve nos dados de alguém, a opção
+conservadora é o padrão.
+
+A reconciliação usa outra estratégia: scan das duas árvores em paralelo,
+comparação de conteúdo em paralelo (fase cara e puramente leitura) e aplicação
+sequencial em ordem de profundidade, onde a ordem importa.
+
+### Verificações de ambiente
+
+Na subida, o serviço avisa sobre condições em que funciona mas não faz o que a
+configuração promete: preservação de dono pedida sem privilégio para tanto,
+`--numeric-ids` sobre filesystem de rede, e consumo de watches perto do limite
+do kernel. Nenhuma delas impede a subida — são todas recuperáveis, e derrubar
+o serviço por um aviso seria pior que operar com a limitação conhecida.
 
 ### Limites do inotify
 

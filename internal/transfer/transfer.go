@@ -57,11 +57,29 @@ func (t *Transfer) Check(ctx context.Context) error {
 
 // CopyFile copia um arquivo de src para dst, ambos absolutos, criando os
 // diretórios intermediários.
+//
+// # Por que --ignore-times
+//
+// Por padrão o rsync decide se precisa transferir comparando tamanho e mtime,
+// o chamado quick check. É uma boa heurística para varrer uma árvore inteira,
+// e é errada aqui: quando o engine chama CopyFile, ele JÁ decidiu, comparando
+// digests, que o arquivo precisa ser atualizado. Deixar o rsync opinar de novo
+// só adiciona uma chance de ele discordar.
+//
+// E ele discorda no pior momento possível. Dois arquivos que divergiram mas
+// têm o mesmo tamanho e o mesmo mtime — precisamente o desfecho comum de um
+// conflito, em que os dois lados foram editados quase juntos — passam no quick
+// check e a transferência é pulada em silêncio. A resolução do conflito
+// "termina com sucesso" sem ter copiado nada.
+//
+// --ignore-times desliga só essa checagem; o algoritmo delta continua valendo,
+// então nada é transferido a mais do que o necessário.
 func (t *Transfer) CopyFile(ctx context.Context, src, dst string) error {
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 		return fmt.Errorf("criando diretório de destino: %w", err)
 	}
-	return t.rsync(ctx, src, dst)
+	args := append(append([]string(nil), t.rsyncArgs...), "--ignore-times", src, dst)
+	return t.run(ctx, args)
 }
 
 // CopyTree copia recursivamente o diretório src para dst.
@@ -87,6 +105,8 @@ func (t *Transfer) CopyTree(ctx context.Context, src, dst string) error {
 		return fmt.Errorf("criando diretório de destino: %w", err)
 	}
 
+	// Sem --ignore-times aqui, ao contrário de CopyFile: numa árvore inteira
+	// o quick check é justamente o que evita retransferir o que não mudou.
 	args := append([]string(nil), t.rsyncArgs...)
 	if t.preserveHardlinks {
 		args = append(args, "--hard-links")
@@ -140,11 +160,6 @@ func (t *Transfer) Remove(path string, isDir bool) error {
 // SyncAttrs propaga apenas modo e timestamps, sem tocar no conteúdo.
 func (t *Transfer) SyncAttrs(ctx context.Context, src, dst string) error {
 	args := []string{"--archive", "--no-recursive", "--existing", "--times", "--perms", src, dst}
-	return t.run(ctx, args)
-}
-
-func (t *Transfer) rsync(ctx context.Context, src, dst string) error {
-	args := append(append([]string(nil), t.rsyncArgs...), src, dst)
 	return t.run(ctx, args)
 }
 

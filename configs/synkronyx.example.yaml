@@ -25,6 +25,7 @@ self_write_ttl: 30s
 # do path; com "/" casam contra o path relativo inteiro.
 exclude:
   - .synkronyx
+  - ".synkronyx-tmp-*"
   - "*.sync-conflict-*"
   - "*.swp"
   - "~$*"
@@ -82,5 +83,27 @@ retry_initial_delay: 2s
 retry_max_delay: 5m
 
 # Periodicidade com que o daemon publica seu estado no banco, para o
-# `synkronyx -status` conseguir reportá-lo sem falar com o processo.
+# `synkronyx -status` conseguir reportá-lo sem falar com o processo. É também
+# o ritmo em que os pedidos de `-resolve` são aplicados.
 heartbeat_interval: 30s
+
+# Sockets, FIFOs e device nodes não têm conteúdo que faça sentido copiar: um
+# socket copiado é um arquivo inerte, um FIFO copiado é um FIFO vazio.
+#
+# skip  — ignora, registrando em nível debug (padrão)
+# error — registra erro para cada um, para quem prefere descobrir que a
+#         árvore tem conteúdo não sincronizável
+special_files: skip
+
+# Quantos eventos podem ser processados em paralelo. O particionamento é por
+# subárvore de primeiro nível, o que preserva a ordem dentro de cada uma —
+# criar um filho antes do pai nunca acontece. Renames entre subárvores passam
+# por uma barreira que espera todos os workers ficarem ociosos.
+#
+# 1 mantém o processamento estritamente sequencial.
+sync_workers: 1
+
+# De quanto em quanto tempo um scan ou reconciliação longa reporta progresso.
+# 0 desliga. Em árvores grandes é a diferença entre "está trabalhando" e
+# "parece travado".
+progress_interval: 15s

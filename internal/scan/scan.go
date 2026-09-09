@@ -21,13 +21,18 @@ type Matcher interface {
 // Inventory mapeia path relativo -> identidade barata do arquivo.
 type Inventory map[string]hash.Stat
 
+// progressEvery é de quantas em quantas entradas o callback de progresso é
+// chamado. Chamá-lo a cada entrada custaria mais que o próprio walk em
+// árvores grandes.
+const progressEvery = 2000
+
 // Walk percorre root inteiro e devolve o inventário.
 //
 // Só metadados são coletados: hashear a árvore inteira num scan de partida
 // seria caro e, na maioria dos casos, desnecessário — o hash é calculado sob
 // demanda, quando tamanho e mtime não bastam para decidir.
 func Walk(ctx context.Context, root string, exclude Matcher) (Inventory, error) {
-	return WalkSubtree(ctx, root, ".", exclude)
+	return WalkSubtree(ctx, root, ".", exclude, nil)
 }
 
 // WalkSubtree percorre apenas rel (relativo a root) e devolve o inventário,
@@ -36,8 +41,15 @@ func Walk(ctx context.Context, root string, exclude Matcher) (Inventory, error) 
 //
 // Se rel não existir, devolve inventário vazio sem erro: o path ter
 // desaparecido é justamente uma das respostas possíveis.
-func WalkSubtree(ctx context.Context, root, rel string, exclude Matcher) (Inventory, error) {
+//
+// onProgress, se não for nil, é chamado periodicamente com o total percorrido
+// até ali. Serve para que uma árvore de milhões de arquivos dê sinal de vida
+// em vez de parecer travada.
+func WalkSubtree(ctx context.Context, root, rel string, exclude Matcher,
+	onProgress func(seen int)) (Inventory, error) {
+
 	inv := make(Inventory)
+	seen := 0
 
 	start := root
 	if rel != "." && rel != "" {
@@ -79,6 +91,11 @@ func WalkSubtree(ctx context.Context, root, rel string, exclude Matcher) (Invent
 			return err
 		}
 		inv[r] = st
+
+		seen++
+		if onProgress != nil && seen%progressEvery == 0 {
+			onProgress(seen)
+		}
 		return nil
 	})
 	if err != nil {

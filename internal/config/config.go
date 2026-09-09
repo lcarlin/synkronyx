@@ -71,7 +71,32 @@ type Config struct {
 	// HeartbeatInterval é a periodicidade com que o daemon publica seu
 	// estado operacional no banco, para o -status poder lê-lo.
 	HeartbeatInterval time.Duration `yaml:"heartbeat_interval"`
+
+	// SpecialFiles decide o que fazer com sockets, FIFOs e device nodes.
+	SpecialFiles SpecialFilesPolicy `yaml:"special_files"`
+
+	// SyncWorkers é quantos eventos podem ser processados em paralelo. O
+	// particionamento é por subárvore de primeiro nível — ver engine.dispatch.
+	SyncWorkers int `yaml:"sync_workers"`
+
+	// ProgressInterval é de quanto em quanto tempo um scan longo reporta
+	// progresso. 0 desliga o relatório.
+	ProgressInterval time.Duration `yaml:"progress_interval"`
 }
+
+// SpecialFilesPolicy — o que fazer com o que não é arquivo, diretório nem
+// symlink.
+type SpecialFilesPolicy string
+
+const (
+	// SpecialFilesSkip ignora sockets, FIFOs e device nodes. É o padrão, e a
+	// razão está em engine.skipSpecial.
+	SpecialFilesSkip SpecialFilesPolicy = "skip"
+	// SpecialFilesError registra erro para cada um encontrado, em vez de
+	// ignorá-lo em silêncio. Para quem prefere descobrir que a árvore tem
+	// conteúdo não sincronizável.
+	SpecialFilesError SpecialFilesPolicy = "error"
+)
 
 // DirDeletePolicy — resposta ao caso da seção 16 (Fail Safe) em que a remoção
 // de um diretório apagaria dados que só existem no destino.
@@ -123,7 +148,7 @@ func Default() Config {
 		RsyncPath:       "rsync",
 		RsyncArgs:       []string{"--archive", "--partial", "--inplace", "--numeric-ids"},
 		LogLevel:        "info",
-		Exclude:         []string{".synkronyx", "*.sync-conflict-*"},
+		Exclude:         []string{".synkronyx", ".synkronyx-tmp-*", "*.sync-conflict-*"},
 
 		HashSampleBytes:   hash.DefaultSampleBytes,
 		PreserveHardlinks: false,
@@ -134,6 +159,10 @@ func Default() Config {
 		RetryMaxDelay:     5 * time.Minute,
 
 		HeartbeatInterval: 30 * time.Second,
+
+		SpecialFiles:     SpecialFilesSkip,
+		SyncWorkers:      1,
+		ProgressInterval: 15 * time.Second,
 	}
 }
 
@@ -248,6 +277,17 @@ func (c Config) Validate() error {
 	}
 	if c.HeartbeatInterval <= 0 {
 		errs = append(errs, errors.New("heartbeat_interval deve ser > 0"))
+	}
+	switch c.SpecialFiles {
+	case SpecialFilesSkip, SpecialFilesError:
+	default:
+		errs = append(errs, fmt.Errorf("special_files inválida: %q", c.SpecialFiles))
+	}
+	if c.SyncWorkers < 1 {
+		errs = append(errs, errors.New("sync_workers deve ser >= 1"))
+	}
+	if c.ProgressInterval < 0 {
+		errs = append(errs, errors.New("progress_interval não pode ser negativo"))
 	}
 
 	return errors.Join(errs...)

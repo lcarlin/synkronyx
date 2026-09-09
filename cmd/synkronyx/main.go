@@ -12,6 +12,8 @@
 // O estado operacional é consultável sem falar com o processo:
 //
 //	synkronyx -config ... -status
+//	synkronyx -config ... -conflicts
+//	synkronyx -config ... -resolve docs/a.txt -with a
 package main
 
 import (
@@ -45,6 +47,9 @@ func run() error {
 		configPath  = flag.String("config", "/etc/synkronyx/synkronyx.yaml", "caminho do arquivo de configuração")
 		checkOnly   = flag.Bool("check", false, "validar a configuração e sair")
 		showStatus  = flag.Bool("status", false, "reportar o estado operacional e sair")
+		showConf    = flag.Bool("conflicts", false, "listar os conflitos abertos e sair")
+		resolvePath = flag.String("resolve", "", "resolver o conflito no path dado (relativo às raízes)")
+		resolveWith = flag.String("with", "", "qual versão vence: a, b ou both")
 		showVersion = flag.Bool("version", false, "exibir a versão e sair")
 	)
 	flag.Parse()
@@ -64,6 +69,18 @@ func run() error {
 	}
 	if *showStatus {
 		return printStatus(context.Background(), os.Stdout, cfg)
+	}
+	if *showConf {
+		return printConflicts(context.Background(), os.Stdout, cfg)
+	}
+	if *resolvePath != "" {
+		if *resolveWith == "" {
+			return errors.New("-resolve exige -with a|b|both")
+		}
+		return resolveConflictCmd(context.Background(), os.Stdout, cfg, *resolvePath, *resolveWith)
+	}
+	if *resolveWith != "" {
+		return errors.New("-with só faz sentido junto com -resolve")
 	}
 
 	log := logging.Default(cfg.LogLevel)

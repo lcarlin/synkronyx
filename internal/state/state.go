@@ -460,3 +460,100 @@ func escapeLike(s string) string {
 	}
 	return string(out)
 }
+
+// Resolution é um pedido de resolução de conflito, gravado pelo CLI e
+// aplicado pelo daemon.
+type Resolution struct {
+	Path        string
+	Want        string
+	RequestedAt time.Time
+	Error       string
+}
+
+// RequestResolution grava (ou substitui) um pedido de resolução.
+func (d *DB) RequestResolution(ctx context.Context, path, want string) error {
+	_, err := d.db.ExecContext(ctx, `
+		INSERT INTO resolutions (path, want, requested_at, applied_at, error)
+		VALUES (?, ?, ?, NULL, NULL)
+		ON CONFLICT(path) DO UPDATE SET
+			want = excluded.want, requested_at = excluded.requested_at,
+			applied_at = NULL, error = NULL`,
+		path, want, time.Now().UnixNano())
+	return err
+}
+
+// PendingResolutions lista os pedidos ainda não aplicados.
+func (d *DB) PendingResolutions(ctx context.Context) ([]Resolution, error) {
+	rows, err := d.db.QueryContext(ctx, `
+		SELECT path, want, requested_at, COALESCE(error, '')
+		FROM resolutions WHERE applied_at IS NULL ORDER BY requested_at`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []Resolution
+	for rows.Next() {
+		var (
+			r         Resolution
+			requested int64
+		)
+		if err := rows.Scan(&r.Path, &r.Want, &requested, &r.Error); err != nil {
+			return nil, err
+		}
+		r.RequestedAt = time.Unix(0, requested)
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// MarkResolutionApplied fecha um pedido. err vazio significa sucesso.
+func (d *DB) MarkResolutionApplied(ctx context.Context, path, errMsg string) error {
+	var e any
+	if errMsg != "" {
+		e = errMsg
+	}
+	_, err := d.db.ExecContext(ctx,
+		`UPDATE resolutions SET applied_at = ?, error = ? WHERE path = ?`,
+		time.Now().UnixNano(), e, path)
+	return err
+}
+
+// ConflictDetail junta o conflito registrado com o estado conhecido dos dois
+// lados, para o relatório de conflitos.
+type ConflictDetail struct {
+	Conflict
+	EntryA *Entry
+	EntryB *Entry
+	Want   string // pedido de resolução pendente, se houver
+}
+
+// ConflictDetails devolve os conflitos abertos já com o contexto dos dois
+// lados e eventual pedido pendente.
+func (d *DB) ConflictDetails(ctx context.Context, limit int) ([]ConflictDetail, error) {
+	conflicts, err := d.UnresolvedConflicts(ctx, limit)
+	if err != nil {
+		return nil, err
+	}
+	pending, err := d.PendingResolutions(ctx)
+	if err != nil {
+		return nil, err
+	}
+	wanted := make(map[string]string, len(pending))
+	for _, r := range pending {
+		wanted[r.Path] = r.Want
+	}
+
+	out := make([]ConflictDetail, 0, len(conflicts))
+	for _, c := range conflicts {
+		det := ConflictDetail{Conflict: c, Want: wanted[c.Path]}
+		if det.EntryA, err = d.Get(ctx, event.SideA, c.Path); err != nil {
+			return nil, err
+		}
+		if det.EntryB, err = d.Get(ctx, event.SideB, c.Path); err != nil {
+			return nil, err
+		}
+		out = append(out, det)
+	}
+	return out, nil
+}

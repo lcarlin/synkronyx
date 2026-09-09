@@ -4,9 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/lcarlin/synkronyx/internal/config"
@@ -118,21 +121,36 @@ func (e *Engine) reconcileSubtree(ctx context.Context, rel string) error {
 
 // reconcile compara as duas árvores sob scope e aplica a política configurada.
 // scope "." abrange a árvore inteira.
+//
+// São três fases, e a separação entre elas é o que permite paralelizar sem
+// abrir mão de determinismo:
+//
+//  1. Scan das duas árvores, em paralelo — são independentes por construção.
+//  2. Comparação de conteúdo dos paths presentes dos dois lados, em paralelo.
+//     É a fase cara (lê e hasheia arquivos) e é puramente leitura, então
+//     paralelizar não muda resultado nenhum.
+//  3. Aplicação, sequencial e em ordem de profundidade. Aqui a ordem importa:
+//     criar um filho antes do pai não funciona, e a lista de subárvores já
+//     resolvidas por inteiro só faz sentido se construída em ordem.
 func (e *Engine) reconcile(ctx context.Context, phase, scope string) error {
 	excluder := config.NewExcluder(e.cfg.Exclude)
 
-	invA, err := scan.WalkSubtree(ctx, e.cfg.A, scope, excluder)
+	start := time.Now()
+	invA, invB, err := e.scanBothSides(ctx, phase, scope, excluder)
 	if err != nil {
-		return fmt.Errorf("scan de A: %w", err)
-	}
-	invB, err := scan.WalkSubtree(ctx, e.cfg.B, scope, excluder)
-	if err != nil {
-		return fmt.Errorf("scan de B: %w", err)
+		return err
 	}
 	e.log.Info("scan concluído", "phase", phase, "scope", scope,
-		"entradas_a", len(invA), "entradas_b", len(invB))
+		"entradas_a", len(invA), "entradas_b", len(invB),
+		"duracao", time.Since(start).Round(time.Millisecond).String())
 
-	var applied, skipped, conflicts, failed int
+	comparisons := e.compareInParallel(ctx, invA, invB)
+
+	var applied, skipped, conflicts, failed, special int
+
+	total := len(scan.Union(invA, invB))
+	progress := e.newProgress(phase, scope, total)
+	defer progress.done()
 
 	// Diretórios já resolvidos por inteiro (copiados ou removidos como
 	// árvore). Seus descendentes precisam ser saltados, e não por economia:
@@ -150,6 +168,8 @@ func (e *Engine) reconcile(ctx context.Context, phase, scope string) error {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
+		progress.tick()
+
 		if underAny(rel, handled) {
 			skipped++
 			continue
@@ -157,6 +177,18 @@ func (e *Engine) reconcile(ctx context.Context, phase, scope string) error {
 
 		stA, inA := invA[rel]
 		stB, inB := invB[rel]
+
+		// Arquivos especiais não são sincronizáveis dos dois lados; ver
+		// engine.skipSpecial.
+		if (inA && stA.IsSpecial()) || (inB && stB.IsSpecial()) {
+			kind := stA.Kind
+			if !inA {
+				kind = stB.Kind
+			}
+			e.skipSpecial(rel, kind, e.log)
+			special++
+			continue
+		}
 
 		var res reconcileResult
 		var err error
@@ -172,7 +204,7 @@ func (e *Engine) reconcile(ctx context.Context, phase, scope string) error {
 				handled = append(handled, rel)
 			}
 		case inA && inB:
-			res, err = e.reconcileBothSides(ctx, rel, stA, stB)
+			res, err = e.reconcileBothSides(ctx, rel, stA, stB, comparisons[rel])
 		}
 
 		if err != nil {
@@ -187,15 +219,176 @@ func (e *Engine) reconcile(ctx context.Context, phase, scope string) error {
 			skipped++
 		case reconcileConflict:
 			conflicts++
+		case reconcileHandledSubtree:
+			conflicts++
+			handled = append(handled, rel)
 		default:
 			applied++
 		}
 	}
 
 	e.log.Info("reconciliação concluída", "phase", phase, "scope", scope,
-		"aplicadas", applied, "sem_acao", skipped, "conflitos", conflicts, "falhas", failed)
+		"aplicadas", applied, "sem_acao", skipped, "conflitos", conflicts,
+		"falhas", failed, "especiais_ignorados", special,
+		"duracao", time.Since(start).Round(time.Millisecond).String())
 	return nil
 }
+
+// scanBothSides percorre as duas árvores em paralelo. São independentes, e o
+// tempo de parada de uma árvore grande é dominado por I/O de metadados —
+// então rodar as duas juntas quase divide o tempo por dois.
+func (e *Engine) scanBothSides(ctx context.Context, phase, scope string,
+	excluder scan.Matcher) (scan.Inventory, scan.Inventory, error) {
+
+	type result struct {
+		inv scan.Inventory
+		err error
+	}
+	out := make([]result, 2)
+	roots := []string{e.cfg.A, e.cfg.B}
+	names := []string{"A", "B"}
+
+	var wg sync.WaitGroup
+	for i := range roots {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			var last atomic.Int64
+			inv, err := scan.WalkSubtree(ctx, roots[i], scope, excluder, func(seen int) {
+				// Relatar por tempo, não por contagem: em árvore pequena não
+				// sai nada, em árvore enorme sai a cada intervalo.
+				if e.cfg.ProgressInterval <= 0 {
+					return
+				}
+				now := time.Now().UnixNano()
+				if prev := last.Load(); now-prev < int64(e.cfg.ProgressInterval) {
+					return
+				}
+				last.Store(now)
+				e.log.Info("scan em andamento", "phase", phase, "scope", scope,
+					"side", names[i], "entradas", seen)
+			})
+			out[i] = result{inv: inv, err: err}
+		}()
+	}
+	wg.Wait()
+
+	if out[0].err != nil {
+		return nil, nil, fmt.Errorf("scan de A: %w", out[0].err)
+	}
+	if out[1].err != nil {
+		return nil, nil, fmt.Errorf("scan de B: %w", out[1].err)
+	}
+	return out[0].inv, out[1].inv, nil
+}
+
+// comparison é o resultado pré-calculado da comparação de um path presente
+// nos dois lados.
+type comparison struct {
+	differs bool
+	err     error
+	known   bool
+}
+
+// compareInParallel calcula, para cada path presente dos dois lados, se os
+// conteúdos divergem.
+//
+// É a fase cara do resync — ler e hashear arquivos — e é puramente leitura:
+// nenhuma decisão é tomada e nada é escrito, então o paralelismo não muda o
+// resultado, só o tempo.
+func (e *Engine) compareInParallel(ctx context.Context, invA, invB scan.Inventory) map[string]comparison {
+	type job struct {
+		rel  string
+		absA string
+		absB string
+	}
+
+	var jobs []job
+	for rel, stA := range invA {
+		stB, ok := invB[rel]
+		if !ok || stA.IsDir || stB.IsDir || stA.IsSpecial() || stB.IsSpecial() {
+			continue
+		}
+		jobs = append(jobs, job{rel: rel, absA: e.abs(event.SideA, rel), absB: e.abs(event.SideB, rel)})
+	}
+	if len(jobs) == 0 {
+		return nil
+	}
+
+	workers := e.cfg.SyncWorkers
+	if workers < 1 {
+		workers = 1
+	}
+	if workers > len(jobs) {
+		workers = len(jobs)
+	}
+
+	out := make(map[string]comparison, len(jobs))
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	next := make(chan job)
+
+	for range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := range next {
+				differs, err := e.contentDiffers(j.absA, j.absB)
+				mu.Lock()
+				out[j.rel] = comparison{differs: differs, err: err, known: true}
+				mu.Unlock()
+			}
+		}()
+	}
+	for _, j := range jobs {
+		select {
+		case next <- j:
+		case <-ctx.Done():
+		}
+	}
+	close(next)
+	wg.Wait()
+
+	return out
+}
+
+// progressReporter emite andamento de uma reconciliação longa.
+type progressReporter struct {
+	log      *slog.Logger
+	phase    string
+	scope    string
+	total    int
+	interval time.Duration
+	seen     int
+	last     time.Time
+	start    time.Time
+}
+
+func (e *Engine) newProgress(phase, scope string, total int) *progressReporter {
+	now := time.Now()
+	return &progressReporter{
+		log: e.log, phase: phase, scope: scope, total: total,
+		interval: e.cfg.ProgressInterval, last: now, start: now,
+	}
+}
+
+func (p *progressReporter) tick() {
+	p.seen++
+	if p.interval <= 0 || time.Since(p.last) < p.interval {
+		return
+	}
+	p.last = time.Now()
+
+	pct := 0
+	if p.total > 0 {
+		pct = p.seen * 100 / p.total
+	}
+	p.log.Info("reconciliação em andamento", "phase", p.phase, "scope", p.scope,
+		"processados", p.seen, "total", p.total, "pct", pct,
+		"decorrido", time.Since(p.start).Round(time.Second).String())
+}
+
+func (p *progressReporter) done() {}
 
 // underAny informa se rel está sob algum dos prefixos dados.
 func underAny(rel string, prefixes []string) bool {
@@ -216,6 +409,9 @@ const (
 	reconcileApplied reconcileResult = iota
 	reconcileNoop
 	reconcileConflict
+	// reconcileHandledSubtree é um conflito que também impede tratar os
+	// descendentes do path.
+	reconcileHandledSubtree
 )
 
 // reconcileOneSided trata um path que existe em apenas um lado.
@@ -282,8 +478,11 @@ func (e *Engine) deleteOneSided(ctx context.Context, rel string, present event.S
 	return e.db.DeleteSubtree(ctx, rel)
 }
 
-// reconcileBothSides trata um path presente nos dois lados.
-func (e *Engine) reconcileBothSides(ctx context.Context, rel string, stA, stB hash.Stat) (reconcileResult, error) {
+// reconcileBothSides trata um path presente nos dois lados. cmp é o resultado
+// da comparação de conteúdo já calculada na fase paralela; se não houver
+// (cmp.known falso), a comparação é feita aqui.
+func (e *Engine) reconcileBothSides(ctx context.Context, rel string, stA, stB hash.Stat,
+	cmp comparison) (reconcileResult, error) {
 	if stA.IsDir && stB.IsDir {
 		return reconcileNoop, nil // diretórios existem dos dois lados; nada a fazer
 	}
@@ -296,11 +495,20 @@ func (e *Engine) reconcileBothSides(ctx context.Context, rel string, stA, stB ha
 		if err := e.db.RecordConflict(ctx, rel, hash.Digest{}, hash.Digest{}); err != nil {
 			return reconcileConflict, err
 		}
-		return reconcileConflict, nil
+		// O tipo divergente contamina tudo abaixo: se A tem um arquivo onde B
+		// tem um diretório, cada filho de B falharia ao ser copiado para
+		// dentro de algo que não é diretório. Sinalizar como resolvido por
+		// inteiro evita uma cascata de erros que descrevem, todos, o mesmo
+		// problema — o do pai.
+		return reconcileHandledSubtree, nil
 	}
 
 	absA, absB := e.abs(event.SideA, rel), e.abs(event.SideB, rel)
-	differs, err := e.contentDiffers(absA, absB)
+
+	differs, err := cmp.differs, cmp.err
+	if !cmp.known {
+		differs, err = e.contentDiffers(absA, absB)
+	}
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return reconcileNoop, nil

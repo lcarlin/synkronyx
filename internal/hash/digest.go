@@ -23,6 +23,13 @@ const (
 	// KindPartial é o SHA-256 de uma amostra: tamanho + início + fim do
 	// arquivo. Usado acima de hash_max_bytes.
 	KindPartial Kind = "sha256p"
+	// KindLink é o SHA-256 do alvo de um symlink, como texto.
+	//
+	// A identidade de um symlink é para onde ele aponta, não o que existe
+	// lá: dois links para o mesmo alvo são equivalentes mesmo que o alvo não
+	// exista, e um link que muda de alvo mudou, mesmo que o conteúdo
+	// apontado seja idêntico.
+	KindLink Kind = "link"
 )
 
 // Digest identifica o conteúdo de um arquivo.
@@ -48,7 +55,7 @@ func (d Digest) String() string {
 	if d.Kind == KindPartial {
 		return fmt.Sprintf("%s:%s:%d", d.Kind, d.Hex, d.Size)
 	}
-	return fmt.Sprintf("%s:%s", KindFull, d.Hex)
+	return fmt.Sprintf("%s:%s", d.Kind, d.Hex)
 }
 
 // Short devolve um prefixo legível para log.
@@ -60,8 +67,11 @@ func (d Digest) Short() string {
 	if len(h) > 12 {
 		h = h[:12]
 	}
-	if d.Kind == KindPartial {
+	switch d.Kind {
+	case KindPartial:
 		return h + "~" // o til marca que é amostra, não conteúdo completo
+	case KindLink:
+		return "link:" + h
 	}
 	return h
 }
@@ -81,10 +91,12 @@ func ParseDigest(s string) (Digest, error) {
 	case 1:
 		return Digest{Kind: KindFull, Hex: parts[0]}, nil
 	case 2:
-		if Kind(parts[0]) != KindFull {
+		switch Kind(parts[0]) {
+		case KindFull, KindLink:
+			return Digest{Kind: Kind(parts[0]), Hex: parts[1]}, nil
+		default:
 			return Digest{}, fmt.Errorf("digest %q: tipo %q exige tamanho", s, parts[0])
 		}
-		return Digest{Kind: KindFull, Hex: parts[1]}, nil
 	case 3:
 		if Kind(parts[0]) != KindPartial {
 			return Digest{}, fmt.Errorf("digest %q: tipo %q inesperado", s, parts[0])
@@ -147,13 +159,24 @@ const DefaultSampleBytes int64 = 2 << 20 // 2 MiB
 // mudança de cabeçalho) por um custo fixo, independente do tamanho do
 // arquivo. É estritamente melhor que a alternativa anterior, que era
 // comparar apenas tamanho e mtime.
+// Um symlink recebe KindLink, com o digest do alvo. Diretórios e arquivos
+// especiais não têm digest: devolve o digest zero, sem erro.
 func Compute(abs string, maxBytes, sampleBytes int64) (Digest, error) {
-	fi, err := os.Stat(abs)
+	fi, err := os.Lstat(abs)
 	if err != nil {
 		return Digest{}, err
 	}
-	if fi.IsDir() {
+
+	switch KindOf(fi.Mode()) {
+	case KindDir, KindSpecial:
 		return Digest{}, nil
+	case KindSymlink:
+		target, err := os.Readlink(abs)
+		if err != nil {
+			return Digest{}, fmt.Errorf("lendo symlink %s: %w", abs, err)
+		}
+		sum := sha256.Sum256([]byte(target))
+		return Digest{Kind: KindLink, Hex: hex.EncodeToString(sum[:])}, nil
 	}
 
 	if maxBytes <= 0 || fi.Size() <= maxBytes {

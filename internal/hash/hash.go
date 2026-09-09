@@ -14,6 +14,39 @@ import (
 	"time"
 )
 
+// FileKind classifica uma entrada do filesystem.
+//
+// A distinção existe porque nem tudo que aparece numa árvore é sincronizável
+// da mesma forma — e algumas coisas não são sincronizáveis de jeito nenhum.
+type FileKind uint8
+
+const (
+	// KindRegular é um arquivo comum.
+	KindRegular FileKind = iota
+	// KindDir é um diretório.
+	KindDir
+	// KindSymlink é um link simbólico. O que se sincroniza é o alvo do link,
+	// como texto, e não o conteúdo apontado.
+	KindSymlink
+	// KindSpecial é socket, FIFO ou device node.
+	KindSpecial
+)
+
+func (k FileKind) String() string {
+	switch k {
+	case KindRegular:
+		return "arquivo"
+	case KindDir:
+		return "diretório"
+	case KindSymlink:
+		return "symlink"
+	case KindSpecial:
+		return "arquivo especial"
+	default:
+		return "desconhecido"
+	}
+}
+
 // Stat é a identidade barata de um arquivo: o que dá para saber sem ler o
 // conteúdo.
 type Stat struct {
@@ -21,9 +54,14 @@ type Stat struct {
 	MTime time.Time
 	Mode  os.FileMode
 	IsDir bool
+	Kind  FileKind
 }
 
 // StatOf coleta a identidade barata de um path absoluto.
+//
+// Usa Lstat, nunca Stat: um symlink precisa ser identificado como symlink,
+// não como aquilo que ele aponta. Seguir o link faria um link quebrado virar
+// erro e um link para fora da árvore virar cópia do alvo.
 func StatOf(abs string) (Stat, error) {
 	fi, err := os.Lstat(abs)
 	if err != nil {
@@ -34,8 +72,27 @@ func StatOf(abs string) (Stat, error) {
 		MTime: fi.ModTime(),
 		Mode:  fi.Mode(),
 		IsDir: fi.IsDir(),
+		Kind:  KindOf(fi.Mode()),
 	}, nil
 }
+
+// KindOf classifica a partir do modo devolvido por Lstat.
+func KindOf(mode os.FileMode) FileKind {
+	switch {
+	case mode.IsDir():
+		return KindDir
+	case mode&os.ModeSymlink != 0:
+		return KindSymlink
+	case mode.IsRegular():
+		return KindRegular
+	default:
+		// Socket, FIFO, device de bloco ou de caractere, ou irregular.
+		return KindSpecial
+	}
+}
+
+// IsSpecial informa se a entrada é socket, FIFO ou device node.
+func (s Stat) IsSpecial() bool { return s.Kind == KindSpecial }
 
 // Unchanged informa se dois Stats são compatíveis o suficiente para presumir
 // conteúdo idêntico sem hashear.
