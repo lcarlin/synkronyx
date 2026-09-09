@@ -261,3 +261,9 @@ func TestDefaultHashMaxBytes(t *testing.T) {
 		t.Errorf("os padrões de hash não são coerentes entre si: %v", err)
 	}
 }
+
+func TestDefaultHashSampleBytes(t *testing.T) {
+	if got := Default().HashSampleBytes; got != 4<<20 {
+		t.Errorf("HashSampleBytes padrão = %d, quero %d (4 MiB)", got, 4<<20)
+	}
+}

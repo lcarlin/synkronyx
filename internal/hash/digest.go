@@ -145,7 +145,11 @@ func Compare(a, b Digest) Comparison {
 }
 
 // DefaultSampleBytes é quanto se lê de cada extremidade no digest amostrado.
-const DefaultSampleBytes int64 = 2 << 20 // 2 MiB
+//
+// Vale para os dois extremos, então o custo por digest é o dobro disto. A
+// amostra é o que estreita o ponto cego da amostragem — quanto mais se lê,
+// menor a faixa central que uma alteração pode ocupar sem ser vista.
+const DefaultSampleBytes int64 = 4 << 20 // 4 MiB de cada ponta, 8 MiB por digest
 
 // Compute calcula o digest de abs.
 //

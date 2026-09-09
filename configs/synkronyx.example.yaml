@@ -61,14 +61,19 @@ log_level: info
 #
 # Isso detecta append, truncamento, reescrita de cabeçalho e alteração de
 # cauda por custo fixo — mas NÃO enxerga uma alteração no meio de um arquivo
-# grande que preserve o tamanho exato. Acima do limite, o digest deixa de ser
-# prova de igualdade e passa a ser evidência forte; o full resync é a rede que
-# pega o resto.
+# grande que preserve o tamanho exato.
+#
+# O ponto cego é mais estreito do que parece. No fluxo normal de eventos, uma
+# escrita sempre altera o mtime, e o mtime é comparado antes do digest: a
+# alteração é propagada de qualquer forma. O digest amostrado só decide
+# sozinho na reconciliação (first sync e full resync), quando os dois lados
+# têm o mesmo tamanho e o mesmo mtime — o caso de uma divergência ocorrida com
+# o serviço parado.
 #
 # 0 desliga a amostragem: digest completo sempre, sem pontos cegos, ao custo
 # de ler o arquivo inteiro a cada evento.
 hash_max_bytes: 104857600   # 100 MiB
-hash_sample_bytes: 2097152  # 2 MiB de cada extremidade
+hash_sample_bytes: 4194304  # 4 MiB de cada extremidade, 8 MiB por digest
 
 # --hard-links só funciona dentro de uma mesma invocação do rsync, então a
 # preservação vale para cópias de árvore (first sync, full resync, diretório

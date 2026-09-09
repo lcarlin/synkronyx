@@ -13,6 +13,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/lcarlin/synkronyx/internal/config"
+	"github.com/lcarlin/synkronyx/internal/event"
 	"github.com/lcarlin/synkronyx/internal/hash"
 )
 
@@ -227,5 +228,65 @@ func TestStateRecordsPartialDigestKind(t *testing.T) {
 	}
 	if d.Size != 32<<10 {
 		t.Errorf("Size = %d, quero %d", d.Size, 32<<10)
+	}
+}
+
+// TestBlindSpotOnlyAffectsReconciliation fixa o alcance real da limitação da
+// amostragem, que é mais estreito do que "alterações no meio não são vistas".
+//
+// Na reconciliação o digest decide sozinho, e ali a limitação vale. No fluxo
+// de eventos não: alreadySynced compara mtime antes, e escrever sempre altera
+// o mtime.
+func TestBlindSpotOnlyAffectsReconciliation(t *testing.T) {
+	eng, cfg, _ := newIdleEngine(t, func(c *config.Config) {
+		c.HashMaxBytes = 8 << 10
+		c.HashSampleBytes = 1 << 10
+	})
+
+	buf := make([]byte, 64<<10)
+	a := filepath.Join(cfg.A, "f.bin")
+	b := filepath.Join(cfg.B, "f.bin")
+	for _, p := range []string{a, b} {
+		if err := os.WriteFile(p, buf, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Divergência só no meio, tamanhos idênticos.
+	f, err := os.OpenFile(b, os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteAt([]byte("DIFERENTE"), 32<<10); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+
+	when := time.Unix(1_700_000_000, 0)
+	for _, p := range []string{a, b} {
+		if err := os.Chtimes(p, when, when); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	differs, err := eng.contentDiffers(a, b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if differs {
+		t.Skip("a amostra alcançou o meio do arquivo; ótimo, mas não é garantido")
+	}
+
+	// Confirmado o ponto cego na reconciliação. Agora a outra metade: com
+	// mtime diferente, o caminho de eventos age sem consultar o digest.
+	if err := os.Chtimes(a, when.Add(time.Hour), when.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	entry, err := eng.entryFor(event.SideA, "f.bin", a, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if entry.MTime.Equal(when) {
+		t.Error("o estado deveria registrar o mtime novo, que é o que dispara a propagação")
 	}
 }

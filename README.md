@@ -149,10 +149,15 @@ meio do arquivo que preserve o tamanho. O tipo do digest é persistido junto
 com o valor, e comparar tipos diferentes é recusado em vez de dar uma resposta
 sem significado.
 
-O padrão é `100 MiB`. Abaixo dele — onde vive a esmagadora maioria dos
-arquivos — o digest é completo e prova igualdade. Acima, vira evidência forte
-em vez de prova, e o Full Resync é a rede que pega o que a amostra não viu.
-`0` desliga a amostragem inteiramente.
+O padrão é `100 MiB`, com amostra de 4 MiB de cada ponta. Abaixo do limite —
+onde vive a esmagadora maioria dos arquivos — o digest é completo e prova
+igualdade.
+
+O ponto cego acima do limite é mais estreito do que parece: no fluxo de
+eventos, uma escrita sempre altera o mtime, que é comparado antes do digest,
+então a alteração é propagada de qualquer forma. O digest amostrado só decide
+sozinho na reconciliação, quando os dois lados têm mesmo tamanho e mesmo
+mtime — a divergência ocorrida com o serviço parado. `0` desliga a amostragem.
 
 ### Paralelismo
 

@@ -28,8 +28,16 @@ extremidades). O tipo é persistido junto com o valor e `hash.Compare` recusa
 comparar tipos diferentes.
 
 **Limitação aceita:** alteração no meio de um arquivo grande que preserve o
-tamanho não é detectada. Append, truncamento, cabeçalho e cauda são.
-`TestPartialDetectsRealisticChanges` fixa o contrato, ponto cego incluído.
+tamanho não é detectada pelo digest. Append, truncamento, cabeçalho e cauda
+são. `TestPartialDetectsRealisticChanges` fixa o contrato, ponto cego incluído.
+
+O alcance da limitação é menor do que a frase sugere, e vale precisar. No
+fluxo de eventos o digest não decide sozinho: `alreadySynced` compara mtime
+antes, e uma escrita sempre altera o mtime, então a alteração é propagada
+mesmo que a amostra não a enxergue. O ponto cego só se manifesta na
+reconciliação, onde `contentDiffers` vai direto aos digests — ou seja, quando
+os dois lados divergiram com o serviço parado e terminaram com o mesmo
+tamanho e o mesmo mtime.
 
 O padrão é `100 MiB`: abaixo disso o digest é completo e prova igualdade;
 acima, é evidência forte, e o Full Resync cobre o que a amostra não viu. `0`
