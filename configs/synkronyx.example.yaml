@@ -19,7 +19,11 @@ debounce: 1s
 # reconhecida como tal. Aumentar se houver arquivos muito grandes: a escrita
 # precisa caber na janela. Não é o único mecanismo anti-loop (ver
 # internal/guard), então errar para mais é barato.
-self_write_ttl: 30s
+#
+# O custo de valores altos é localizado: depois de resolver um conflito, o
+# engine mantém a expectativa até o TTL vencer, e nesse intervalo alterações
+# externas naquele path específico são ignoradas.
+self_write_ttl: 60s
 
 # Padrões ignorados nos dois lados. Sem "/" casam contra qualquer componente
 # do path; com "/" casam contra o path relativo inteiro.

@@ -232,3 +232,9 @@ func TestDefaultDebounce(t *testing.T) {
 		t.Errorf("Debounce padrão = %s, quero 1s", got)
 	}
 }
+
+func TestDefaultSelfWriteTTL(t *testing.T) {
+	if got := Default().SelfWriteTTL; got != 60*time.Second {
+		t.Errorf("SelfWriteTTL padrão = %s, quero 60s", got)
+	}
+}
