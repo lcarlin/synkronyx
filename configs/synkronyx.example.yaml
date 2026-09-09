@@ -51,6 +51,36 @@ rsync_args:
 # debug | info | warn | error
 log_level: info
 
-# Arquivos acima deste tamanho não são hasheados; a comparação cai para
-# tamanho e mtime. 0 = sem limite.
+# Acima deste tamanho o digest passa a ser amostrado em vez de completo:
+# tamanho + os primeiros e os últimos hash_sample_bytes. Detecta append,
+# truncamento e reescrita de cabeçalho por custo fixo, mas não enxerga uma
+# alteração no meio de um arquivo grande que preserve o tamanho.
+# 0 = sempre completo (padrão, mais lento e sem pontos cegos).
 hash_max_bytes: 0
+hash_sample_bytes: 2097152  # 2 MiB de cada extremidade
+
+# --hard-links só funciona dentro de uma mesma invocação do rsync, então a
+# preservação vale para cópias de árvore (first sync, full resync, diretório
+# novo) e não para arquivos propagados um a um por evento. Ligações criadas
+# incrementalmente só voltam a existir no próximo full resync.
+preserve_hardlinks: false
+
+# O que fazer ao propagar a remoção de um diretório que, no destino, contém
+# conteúdo que nunca foi sincronizado (criado lá e não propagado, ou alterado
+# lá depois da última sincronização).
+#
+# preserve-unknown — move esse conteúdo para <dir>.sync-conflict-<lado>-<data>
+#                    antes de remover (padrão, fail safe)
+# force            — remove o diretório inteiro sem inspecionar
+dir_delete_policy: preserve-unknown
+
+# Reenvio de operações que falharam, com backoff exponencial. Esgotadas as
+# tentativas, o path é marcado com erro e um full resync é solicitado.
+# 0 tentativas desliga o retry e faz cada falha depender do próximo resync.
+retry_max_attempts: 5
+retry_initial_delay: 2s
+retry_max_delay: 5m
+
+# Periodicidade com que o daemon publica seu estado no banco, para o
+# `synkronyx -status` conseguir reportá-lo sem falar com o processo.
+heartbeat_interval: 30s

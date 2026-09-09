@@ -1,72 +1,143 @@
 # Decisões abertas e limitações conhecidas
 
-O que ainda não está resolvido no esqueleto atual. Cada item diz o que existe
-hoje e o que falta.
+Os oito itens originais foram implementados. O que sobra aqui são as
+**limitações que sobreviveram às decisões** — nenhuma delas é um TODO
+disfarçado: são consequências aceitas, documentadas para que ninguém as
+descubra em produção.
 
-## 1. Rename de diretório com conteúdo, no destino
+A seção final lista o que de fato continua em aberto.
 
-**Hoje:** `engine.propagateMove` faz `os.Rename` no destino, o que é correto e
-barato. Se a origem não existir no destino, degrada para cópia.
+---
 
-**Falta:** a cópia de fallback usa o path de destino, mas não reconcilia o
-subtree inteiro quando o que se moveu é um diretório grande. Um Full Resync
-corrige, mas seria melhor tratar no momento.
+## Resolvido
 
-## 2. Hardlinks e links simbólicos
+### 1. Rename de diretório com conteúdo
 
-**Hoje:** `rsync --archive` preserva symlinks. O estado guarda `Lstat`, então
-um symlink é tratado como entrada própria.
+Quando o rename falha porque a origem não existe no destino, o engine
+reconcilia a subárvore (`engine.reconcileSubtree`) em vez de copiar só o path.
+Um rename bem-sucedido de diretório também reescreve o estado de todo o
+conteúdo, cujos paths mudaram junto.
 
-**Falta:** hardlinks não são preservados entre os lados (`--hard-links` não
-está nos args padrão, por custo). Decidir se é requisito.
+Cobrir a subárvore em vez de disparar um Full Resync é proposital: pagar uma
+varredura das duas árvores inteiras por uma divergência de um diretório é
+desproporcional.
 
-## 3. Arquivos grandes e `hash_max_bytes`
+### 2. Hardlinks e symlinks
 
-**Hoje:** acima do limite, a comparação cai para tamanho + mtime. Dois
-arquivos de mesmo tamanho com conteúdo diferente seriam considerados iguais.
+Symlinks já eram preservados por `rsync --archive`. Hardlinks passaram a ser
+opcionais via `preserve_hardlinks`.
 
-**Falta:** um hash parcial (primeiros e últimos N bytes + tamanho) daria uma
-resposta muito melhor pelo mesmo custo. Padrão atual é `0` (sem limite), que é
-seguro mas caro em árvores com arquivos muito grandes.
+**Limitação aceita:** `--hard-links` só enxerga ligações dentro de uma mesma
+invocação do rsync. A opção vale, portanto, para cópias de árvore — First
+Sync, Full Resync, diretório novo — e não para arquivos propagados um a um por
+evento. Dois arquivos ligados que chegam em eventos separados viram dois
+arquivos independentes de mesmo conteúdo. Quem depende de hardlinks precisa
+contar com o Full Resync para restabelecê-los.
 
-## 4. Política de First Sync
+Padrão desligado: o custo de detecção não se justifica para a maioria dos
+usos.
 
-**Hoje:** `union`, `a-wins` e `b-wins` implementadas. Em `union`, um arquivo
-presente só de um lado é copiado — a menos que o estado registre que ele já
-existiu do outro, caso em que é interpretado como remoção.
+### 3. Arquivos grandes
 
-**Falta:** validar essa heurística contra o caso de banco de estado perdido
-(disco novo, `state.db` apagado). Nessa situação tudo vira "novo" e uma
-remoção feita offline seria desfeita. Documentar como comportamento esperado
-ou detectar o estado vazio explicitamente.
+Acima de `hash_max_bytes` o digest passa a ser amostrado: tamanho + os
+primeiros e os últimos `hash_sample_bytes` (`hash.KindPartial`). O tipo do
+digest é persistido junto com o valor, e `hash.Compare` recusa comparar
+tipos diferentes — um digest amostrado nunca é lido como se fosse completo.
 
-## 5. Ordem de remoção de diretórios não vazios
+**Limitação aceita:** uma alteração no meio de um arquivo grande que preserve
+o tamanho não é detectada. Append, truncamento, reescrita de cabeçalho e
+mudança de cauda são. O teste `TestPartialDetectsRealisticChanges` fixa esse
+contrato, inclusive o ponto cego.
 
-**Hoje:** `transfer.Remove` usa `os.RemoveAll` para diretórios.
+O padrão continua sendo `hash_max_bytes: 0` — digest completo, mais lento e
+sem pontos cegos. A amostragem é para quem escolhe explicitamente trocar
+certeza por custo.
 
-**Falta:** decidir se remover um diretório no lado A deve apagar,
-incondicionalmente, conteúdo criado em B que nunca chegou a A. Hoje apaga.
-Sob o princípio Fail Safe, talvez devesse preservar.
+### 4. Política de First Sync com estado perdido
 
-## 6. Métricas e observabilidade
+O engine detecta o caso em que o First Sync já rodou antes mas o banco está
+vazio (`state.IsEmpty`) e emite um aviso explícito.
 
-**Hoje:** log estruturado em journald, com contadores do guard em nível debug.
+**Comportamento aceito, não corrigido:** sem histórico, `union` não distingue
+"arquivo novo neste lado" de "arquivo apagado do outro lado" — as duas
+situações são idênticas no disco. Remoções feitas com o serviço parado são
+desfeitas.
 
-**Falta:** um endpoint ou comando de status (`synkronyx -status`) que reporte
-fila pendente, conflitos não resolvidos e número de watches ativos.
+Isso é Fail Safe funcionando: ressuscitar um arquivo é o erro recuperável
+(basta apagar de novo), apagá-lo é o irrecuperável. O que não era aceitável
+era fazê-lo em silêncio, e isso mudou — o aviso sai no log na subida e no
+`synkronyx -status`.
 
-## 7. Retry de transferências que falharam
+### 5. Remoção de diretórios não vazios
 
-**Hoje:** falha de rsync é logada e o evento é descartado. O estado não é
-atualizado, então um Full Resync posterior corrige.
+Padrão `dir_delete_policy: preserve-unknown`. Antes de propagar a remoção de
+um diretório, o engine inspeciona o destino e põe de lado tudo o que o estado
+não conhece — arquivos criados ali e nunca propagados, e arquivos alterados
+localmente depois da última sincronização. O que é preservado vai para
+`<dir>.sync-conflict-<lado>-<data>/`, que casa com o exclude padrão e portanto
+não volta a ser sincronizado.
 
-**Falta:** fila de retry com backoff para falhas transitórias (disco cheio,
-arquivo temporariamente travado), em vez de depender do próximo resync.
+`force` mantém o comportamento anterior, para quem prefere velocidade.
 
-## 8. Watch da raiz removida
+### 6. Observabilidade
 
-**Hoje:** se a própria raiz observada for removida, o watcher loga erro e para
-de receber eventos daquele lado.
+`synkronyx -status` reporta watches ativos, fila de retry, contagem de
+entradas por lado e por status, conflitos abertos e idade do último
+heartbeat — sinalizando quando o heartbeat está vencido e o daemon
+provavelmente morreu.
 
-**Falta:** o serviço deveria falhar explicitamente (e deixar o systemd
-reiniciar) em vez de continuar rodando meio-cego.
+O daemon publica o heartbeat na tabela `meta` do próprio banco; o comando lê
+de lá. Sem socket de controle, sem protocolo, sem superfície de rede nova —
+a opção KISS da seção 16.
+
+**Limitação aceita:** o relatório é do último heartbeat, não do instante da
+consulta. `heartbeat_interval` controla essa granularidade.
+
+### 7. Retry de transferências
+
+Fila em memória com backoff exponencial (`retry_max_attempts`,
+`retry_initial_delay`, `retry_max_delay`). Esgotadas as tentativas, o path é
+marcado com `status = error` e um Full Resync é solicitado — nunca um descarte
+silencioso.
+
+**Escolha aceita:** a fila não é persistida. Se o processo morrer, o First
+Sync do próximo boot cobre o que estava pendente. Persistir daria durabilidade
+que o resync já oferece, ao custo de mais estado para manter coerente.
+
+### 8. Raiz removida
+
+O watcher sinaliza falha terminal (`Watcher.Fatal`) quando a raiz observada é
+removida, movida ou desmontada, e `Engine.Run` retorna erro. O systemd
+reinicia o serviço, que volta quando a raiz existir de novo.
+
+Continuar rodando seria pior: um lado ficaria cego enquanto o outro seguisse
+propagando normalmente.
+
+---
+
+## Ainda em aberto
+
+**Arquivos especiais.** Sockets, FIFOs e device nodes não têm tratamento
+próprio nem teste. O `rsync --archive` os copia, mas o comportamento do
+watcher e do digest sobre eles não foi verificado.
+
+**UIDs e GIDs entre máquinas.** `--numeric-ids` preserva os números, o que só
+faz sentido se os dois lados compartilharem a base de usuários. Não há
+validação nem aviso quando não compartilham.
+
+**First Sync de árvores muito grandes.** O scan é sequencial e a reconciliação
+também. Não há paralelismo nem relatório de progresso; uma árvore de milhões
+de arquivos vai demorar sem dar sinal de vida além do log final.
+
+**Conflito de tipo (arquivo × diretório).** É detectado e registrado, mas
+nenhuma política automática o resolve — sempre exige intervenção. É
+deliberado, e a intervenção não tem ferramenta: hoje se resolve editando o
+disco à mão.
+
+**Resolução de conflito assistida.** Não existe comando para listar, comparar
+e resolver conflitos. `-status` lista os paths; o resto é manual.
+
+**Latência sob rajada muito alta.** O debounce é por path, mas o engine
+processa em uma goroutine só. Uma rajada em milhares de arquivos distintos
+serializa. O particionamento por path está previsto no comentário de abertura
+do `internal/engine`, mas não implementado.

@@ -1,13 +1,13 @@
--- Estado do Synkronyx (seção 7 do escopo).
+-- Schema base do Synkronyx (seção 7 do escopo), versão 1.
+--
+-- Alterações posteriores NÃO entram aqui: vão como migração em migrations.go,
+-- para que um banco já existente chegue ao mesmo formato de um recém-criado.
+-- Este arquivo descreve o ponto de partida, não o estado atual.
 --
 -- O banco é deliberadamente pequeno: guarda o que foi sincronizado por
 -- último, por lado, para responder a uma única pergunta — "o que estou vendo
 -- agora é diferente do que eu mesmo escrevi?". É essa resposta que distingue
 -- alteração externa, eco do sincronizador e conflito.
-
-PRAGMA journal_mode = WAL;
-PRAGMA synchronous = NORMAL;
-PRAGMA foreign_keys = ON;
 
 CREATE TABLE IF NOT EXISTS entries (
     path        TEXT    NOT NULL,          -- path relativo à raiz do lado
@@ -16,7 +16,7 @@ CREATE TABLE IF NOT EXISTS entries (
     size        INTEGER NOT NULL DEFAULT 0,
     mtime_ns    INTEGER NOT NULL DEFAULT 0,
     mode        INTEGER NOT NULL DEFAULT 0,
-    sha256      TEXT,                      -- NULL quando não calculado (diretório, ou acima do limite)
+    sha256      TEXT,                      -- renomeado para digest na v2
     synced_at   INTEGER NOT NULL DEFAULT 0, -- unix ns da última sincronização bem-sucedida
     status      TEXT    NOT NULL DEFAULT 'synced', -- synced | pending | conflict | error
     PRIMARY KEY (path, side)

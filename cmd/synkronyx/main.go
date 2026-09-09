@@ -8,6 +8,10 @@
 //
 //	SIGINT, SIGTERM  encerram o serviço de forma ordenada
 //	SIGHUP           dispara um Full Resync sem reiniciar o processo
+//
+// O estado operacional é consultável sem falar com o processo:
+//
+//	synkronyx -config ... -status
 package main
 
 import (
@@ -40,6 +44,7 @@ func run() error {
 	var (
 		configPath  = flag.String("config", "/etc/synkronyx/synkronyx.yaml", "caminho do arquivo de configuração")
 		checkOnly   = flag.Bool("check", false, "validar a configuração e sair")
+		showStatus  = flag.Bool("status", false, "reportar o estado operacional e sair")
 		showVersion = flag.Bool("version", false, "exibir a versão e sair")
 	)
 	flag.Parse()
@@ -56,6 +61,9 @@ func run() error {
 	if *checkOnly {
 		fmt.Printf("configuração válida: A=%s B=%s estado=%s\n", cfg.A, cfg.B, cfg.StatePath)
 		return nil
+	}
+	if *showStatus {
+		return printStatus(context.Background(), os.Stdout, cfg)
 	}
 
 	log := logging.Default(cfg.LogLevel)

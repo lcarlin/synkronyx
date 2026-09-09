@@ -31,6 +31,7 @@
 package guard
 
 import (
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -47,6 +48,19 @@ type expectation struct {
 	count   int // uma escrita pode gerar mais de um evento (CREATE + CLOSE_WRITE + ATTRIB)
 }
 
+// subtree é uma expectativa que cobre um prefixo inteiro de paths.
+//
+// Existe porque algumas operações do sincronizador tocam um número
+// desconhecido de arquivos de uma vez: copiar uma árvore com rsync, remover
+// um diretório recursivamente, renomear um diretório com conteúdo. Cada uma
+// dessas gera um evento por entrada afetada, e não há como contá-los de
+// antemão — então essa expectativa não tem contador, só prazo.
+type subtree struct {
+	side    event.Side
+	prefix  string
+	expires time.Time
+}
+
 // Guard registra escritas feitas pelo próprio sincronizador para que os
 // eventos resultantes não sejam reinterpretados como alterações externas.
 //
@@ -55,8 +69,9 @@ type Guard struct {
 	ttl time.Duration
 	now func() time.Time
 
-	mu   sync.Mutex
-	seen map[key]*expectation
+	mu       sync.Mutex
+	seen     map[key]*expectation
+	subtrees []subtree
 
 	// métricas simples, úteis no log periódico
 	matched, expired uint64
@@ -87,6 +102,42 @@ func (g *Guard) Expect(side event.Side, path string, events int) {
 	}
 	exp.count += events
 	exp.expires = g.now().Add(g.ttl)
+}
+
+// ExpectSubtree anuncia que o sincronizador vai tocar um número
+// indeterminado de paths sob prefix, no lado dado.
+//
+// Use para cópia de árvore, remoção recursiva e rename de diretório. Para uma
+// escrita de arquivo único, prefira Expect: o contador é mais preciso e
+// libera a supressão assim que os eventos esperados chegam, em vez de esperar
+// o TTL.
+func (g *Guard) ExpectSubtree(side event.Side, prefix string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	expires := g.now().Add(g.ttl)
+	for i := range g.subtrees {
+		if g.subtrees[i].side == side && g.subtrees[i].prefix == prefix {
+			g.subtrees[i].expires = expires
+			return
+		}
+	}
+	g.subtrees = append(g.subtrees, subtree{side: side, prefix: prefix, expires: expires})
+}
+
+// ForgetSubtree descarta a expectativa de subárvore de (side, prefix).
+func (g *Guard) ForgetSubtree(side event.Side, prefix string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	kept := g.subtrees[:0]
+	for _, st := range g.subtrees {
+		if st.side == side && st.prefix == prefix {
+			continue
+		}
+		kept = append(kept, st)
+	}
+	g.subtrees = kept
 }
 
 // Consume informa se o evento corresponde a uma escrita do próprio
@@ -121,7 +172,34 @@ func (g *Guard) Consume(ev event.Event) bool {
 		g.matched++
 		return true
 	}
+
+	// Nenhuma expectativa exata; resta ver se algum prefixo cobre o evento.
+	// Expectativas de subárvore não têm contador, então casar não as consome.
+	for _, st := range g.subtrees {
+		if st.side != ev.Side || st.expires.Before(now) {
+			continue
+		}
+		for _, p := range paths {
+			if underPrefix(p, st.prefix) {
+				g.matched++
+				return true
+			}
+		}
+	}
 	return false
+}
+
+// underPrefix informa se path é prefix ou está abaixo dele.
+func underPrefix(path, prefix string) bool {
+	if prefix == "." || prefix == "" {
+		return true
+	}
+	if path == prefix {
+		return true
+	}
+	return len(path) > len(prefix) &&
+		path[:len(prefix)] == prefix &&
+		path[len(prefix)] == filepath.Separator
 }
 
 // Forget descarta a expectativa de (side, path). Usado quando a escrita
@@ -147,6 +225,17 @@ func (g *Guard) Sweep() int {
 			n++
 		}
 	}
+
+	kept := g.subtrees[:0]
+	for _, st := range g.subtrees {
+		if st.expires.Before(now) {
+			n++
+			continue
+		}
+		kept = append(kept, st)
+	}
+	g.subtrees = kept
+
 	g.expired += uint64(n)
 	return n
 }
@@ -155,5 +244,5 @@ func (g *Guard) Sweep() int {
 func (g *Guard) Stats() (pending int, matched, expired uint64) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	return len(g.seen), g.matched, g.expired
+	return len(g.seen) + len(g.subtrees), g.matched, g.expired
 }

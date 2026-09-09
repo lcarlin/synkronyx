@@ -8,11 +8,13 @@ A especificação completa está em [SYNKRONYX-HIGH-LEVEL-SCOPE.md](SYNKRONYX-HI
 
 ## Estado atual
 
-Esqueleto funcional. O caminho principal está implementado e coberto por
-testes de integração contra inotify e rsync reais: propagação nos dois
-sentidos, rename, delete, subdiretórios, First Sync e prevenção de loops.
-O que ainda não está pronto está listado em
-[docs/DECISOES-ABERTAS.md](docs/DECISOES-ABERTAS.md).
+Funcional. Propagação nos dois sentidos, rename, delete, subdiretórios, First
+Sync, Full Resync, conflitos, retry com backoff, remoção segura de diretórios
+e prevenção de loops — tudo coberto por testes de integração contra inotify e
+rsync reais.
+
+As limitações que sobreviveram às decisões de projeto, e o que continua em
+aberto, estão em [docs/DECISOES-ABERTAS.md](docs/DECISOES-ABERTAS.md).
 
 ## Build
 
@@ -47,6 +49,31 @@ journalctl -u synkronyx -f
 sudo systemctl kill -s HUP synkronyx
 ```
 
+Estado operacional, sem falar com o processo:
+
+```bash
+synkronyx -config /etc/synkronyx/synkronyx.yaml -status
+```
+
+```text
+raiz A:            /dados/A
+raiz B:            /dados/B
+estado:            /var/lib/synkronyx/state.db (schema v2)
+processo:          último heartbeat há 12s (pid 4821)
+watches:           1843
+fila de retry:     0
+first sync:        2026-09-09T11:02:31-03:00
+último resync:     -
+entradas:          A=9241 B=9241
+por status:        synced=9240 error=1
+conflitos abertos: 2
+```
+
+O daemon publica o heartbeat na tabela `meta` do próprio banco e o comando lê
+de lá — sem socket de controle e sem protocolo novo para manter. O relatório
+é do último heartbeat, não do instante da consulta, e avisa quando o
+heartbeat está vencido.
+
 ## Arquitetura
 
 ```text
@@ -65,11 +92,11 @@ sudo systemctl kill -s HUP synkronyx
 | `internal/watcher` | watch recursivo, pareamento de rename, tradução para eventos de domínio |
 | `internal/guard` | prevenção de loops — camada 1 (expectativa de escrita própria) |
 | `internal/debounce` | agrupamento de rajadas por path |
-| `internal/engine` | decisão e execução da sincronização; conflitos; First Sync e Full Resync |
+| `internal/engine` | decisão e execução da sincronização; conflitos; retry; First Sync e Full Resync |
 | `internal/state` | estado persistente em SQLite (Go puro, sem CGO) |
 | `internal/transfer` | execução do rsync e operações locais de filesystem |
 | `internal/scan` | inventário das árvores para reconciliação |
-| `internal/hash` | SHA-256 sob demanda, com filtro barato por metadados |
+| `internal/hash` | digest de conteúdo (completo ou amostrado), com filtro barato por metadados |
 
 ### Prevenção de loops
 
@@ -90,6 +117,25 @@ verdadeira em vez de provável, quando uma escrita demora mais que o TTL. Ver
 `TestNoSyncLoop` (em `internal/engine/engine_test.go`) é o teste que guarda
 essa propriedade.
 
+### Remoção de diretórios
+
+Propagar a remoção de um diretório pode destruir o que só existe no destino:
+arquivos criados lá e nunca propagados não têm cópia na origem para serem
+recuperados. Por isso a política padrão (`dir_delete_policy:
+preserve-unknown`) inspeciona o destino antes de remover e move o que o
+estado não conhece para `<dir>.sync-conflict-<lado>-<data>/`.
+
+### Digest de conteúdo
+
+Até `hash_max_bytes` o digest é o SHA-256 completo. Acima, passa a ser
+amostrado — tamanho mais as duas extremidades —, o que detecta append,
+truncamento e reescrita de cabeçalho por custo fixo, mas não uma alteração no
+meio do arquivo que preserve o tamanho. O tipo do digest é persistido junto
+com o valor, e comparar tipos diferentes é recusado em vez de dar uma resposta
+sem significado.
+
+O padrão é `0`: digest completo, sem pontos cegos.
+
 ### Limites do inotify
 
 Cada diretório observado consome um watch, nas duas árvores. O padrão de
@@ -103,7 +149,10 @@ cat /proc/sys/fs/inotify/max_user_watches
 ```
 
 Se a fila do kernel estourar (`IN_Q_OVERFLOW`), eventos são perdidos; o
-watcher sinaliza e o engine responde com um Full Resync automático.
+watcher sinaliza e o engine responde com um Full Resync automático. Se a raiz
+observada for removida, movida ou desmontada, o watcher reporta falha terminal
+e o serviço encerra para o systemd reiniciá-lo — seguir rodando deixaria um
+lado cego enquanto o outro continua propagando.
 
 ## Layout
 

@@ -68,23 +68,3 @@ func File(abs string) (string, error) {
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
-
-// FileLimited calcula o SHA-256 apenas se o arquivo couber em maxBytes.
-// maxBytes <= 0 significa sem limite. Acima do limite devolve ("", false, nil):
-// o chamador deve decidir por metadados.
-func FileLimited(abs string, maxBytes int64) (string, bool, error) {
-	if maxBytes > 0 {
-		fi, err := os.Stat(abs)
-		if err != nil {
-			return "", false, err
-		}
-		if fi.Size() > maxBytes {
-			return "", false, nil
-		}
-	}
-	sum, err := File(abs)
-	if err != nil {
-		return "", false, err
-	}
-	return sum, true, nil
-}

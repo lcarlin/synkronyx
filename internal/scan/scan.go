@@ -21,15 +21,30 @@ type Matcher interface {
 // Inventory mapeia path relativo -> identidade barata do arquivo.
 type Inventory map[string]hash.Stat
 
-// Walk percorre root e devolve o inventário completo.
+// Walk percorre root inteiro e devolve o inventário.
 //
 // Só metadados são coletados: hashear a árvore inteira num scan de partida
 // seria caro e, na maioria dos casos, desnecessário — o hash é calculado sob
 // demanda, quando tamanho e mtime não bastam para decidir.
 func Walk(ctx context.Context, root string, exclude Matcher) (Inventory, error) {
+	return WalkSubtree(ctx, root, ".", exclude)
+}
+
+// WalkSubtree percorre apenas rel (relativo a root) e devolve o inventário,
+// com as chaves ainda relativas a root — o que permite compor o resultado com
+// o de um Walk completo sem reescrever paths.
+//
+// Se rel não existir, devolve inventário vazio sem erro: o path ter
+// desaparecido é justamente uma das respostas possíveis.
+func WalkSubtree(ctx context.Context, root, rel string, exclude Matcher) (Inventory, error) {
 	inv := make(Inventory)
 
-	err := filepath.WalkDir(root, func(abs string, d fs.DirEntry, err error) error {
+	start := root
+	if rel != "." && rel != "" {
+		start = filepath.Join(root, rel)
+	}
+
+	err := filepath.WalkDir(start, func(abs string, d fs.DirEntry, err error) error {
 		if err != nil {
 			// Um path que sumiu durante o walk simplesmente não entra no
 			// inventário; o watcher já emitiu o evento correspondente.
@@ -45,11 +60,11 @@ func Walk(ctx context.Context, root string, exclude Matcher) (Inventory, error) 
 			return nil
 		}
 
-		rel, err := filepath.Rel(root, abs)
+		r, err := filepath.Rel(root, abs)
 		if err != nil {
 			return err
 		}
-		if exclude != nil && exclude.Excluded(rel, d.IsDir()) {
+		if exclude != nil && exclude.Excluded(r, d.IsDir()) {
 			if d.IsDir() {
 				return fs.SkipDir
 			}
@@ -63,10 +78,13 @@ func Walk(ctx context.Context, root string, exclude Matcher) (Inventory, error) 
 			}
 			return err
 		}
-		inv[rel] = st
+		inv[r] = st
 		return nil
 	})
 	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return inv, nil
+		}
 		return nil, err
 	}
 	return inv, nil

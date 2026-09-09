@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -193,5 +194,66 @@ func TestTreeRemoveSubtree(t *testing.T) {
 	}
 	if _, ok := tr.pathOf(3); !ok {
 		t.Error("\"ab\" não é descendente de \"a\" e não deveria ter sido removido")
+	}
+}
+
+// A raiz deixar de existir é terminal: o lado fica cego, e seguir rodando
+// faria o engine propagar só uma direção sem perceber.
+func TestWatcherReportsRootRemovalAsFatal(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "raiz")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	w := startWatcher(t, root)
+
+	if err := os.RemoveAll(root); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case err := <-w.Fatal():
+		if err == nil {
+			t.Fatal("Fatal devolveu erro nulo")
+		}
+		if !strings.Contains(err.Error(), "removida") {
+			t.Errorf("erro = %q, quero menção à remoção da raiz", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("remoção da raiz não gerou falha terminal")
+	}
+}
+
+func TestWatcherReportsRootRenameAsFatal(t *testing.T) {
+	dir := t.TempDir()
+	root := filepath.Join(dir, "raiz")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	w := startWatcher(t, root)
+
+	if err := os.Rename(root, filepath.Join(dir, "outro-nome")); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case err := <-w.Fatal():
+		if !strings.Contains(err.Error(), "movida") {
+			t.Errorf("erro = %q, quero menção à raiz movida", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("rename da raiz não gerou falha terminal")
+	}
+}
+
+func TestWatchCountTracksDirectories(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "a", "b"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	w := startWatcher(t, root)
+
+	// raiz + a + a/b
+	if got := w.WatchCount(); got != 3 {
+		t.Errorf("WatchCount() = %d, quero 3", got)
 	}
 }

@@ -58,17 +58,24 @@ func (e *Engine) detectConflict(ctx context.Context, ev event.Event, srcAbs, dst
 }
 
 func (e *Engine) contentDiffers(srcAbs, dstAbs string) (bool, error) {
-	srcSum, srcOK, err := hash.FileLimited(srcAbs, e.cfg.HashMaxBytes)
+	srcDigest, err := e.digestOf(srcAbs)
 	if err != nil {
 		return false, err
 	}
-	dstSum, dstOK, err := hash.FileLimited(dstAbs, e.cfg.HashMaxBytes)
+	dstDigest, err := e.digestOf(dstAbs)
 	if err != nil {
 		return false, err
 	}
-	if !srcOK || !dstOK {
-		// Arquivo grande demais para hashear: cai para metadados. Tamanhos
-		// diferentes provam diferença; iguais, presumimos igualdade.
+
+	switch hash.Compare(srcDigest, dstDigest) {
+	case hash.Same:
+		return false, nil
+	case hash.Different:
+		return true, nil
+	default:
+		// Sem digest de algum dos lados (diretório, ou falha de leitura já
+		// tratada acima). Tamanho é o que resta, e diferença de tamanho
+		// prova diferença de conteúdo.
 		srcStat, err := hash.StatOf(srcAbs)
 		if err != nil {
 			return false, err
@@ -79,7 +86,6 @@ func (e *Engine) contentDiffers(srcAbs, dstAbs string) (bool, error) {
 		}
 		return srcStat.Size != dstStat.Size, nil
 	}
-	return srcSum != dstSum, nil
 }
 
 // resolveConflict aplica a política configurada. O princípio Fail Safe da
@@ -87,20 +93,27 @@ func (e *Engine) contentDiffers(srcAbs, dstAbs string) (bool, error) {
 func (e *Engine) resolveConflict(ctx context.Context, ev event.Event, srcAbs, dstAbs string) error {
 	dstSide := ev.Side.Opposite()
 
-	srcSum, _, _ := hash.FileLimited(srcAbs, e.cfg.HashMaxBytes)
-	dstSum, _, _ := hash.FileLimited(dstAbs, e.cfg.HashMaxBytes)
-
-	shaA, shaB := srcSum, dstSum
-	if ev.Side == event.SideB {
-		shaA, shaB = dstSum, srcSum
+	srcDigest, err := e.digestOf(srcAbs)
+	if err != nil {
+		return err
 	}
-	if err := e.db.RecordConflict(ctx, ev.Path, shaA, shaB); err != nil {
+	dstDigest, err := e.digestOf(dstAbs)
+	if err != nil {
+		return err
+	}
+
+	digestA, digestB := srcDigest, dstDigest
+	if ev.Side == event.SideB {
+		digestA, digestB = dstDigest, srcDigest
+	}
+	if err := e.db.RecordConflict(ctx, ev.Path, digestA, digestB); err != nil {
 		return err
 	}
 
 	e.log.Warn("conflito detectado",
 		"path", ev.Path, "policy", string(e.cfg.ConflictPolicy),
-		"sha_"+ev.Side.String(), short(srcSum), "sha_"+dstSide.String(), short(dstSum))
+		"digest_"+ev.Side.String(), srcDigest.Short(),
+		"digest_"+dstSide.String(), dstDigest.Short())
 
 	switch e.cfg.ConflictPolicy {
 	case config.ConflictManual:
@@ -182,11 +195,4 @@ func conflictName(rel string, side event.Side, at time.Time) string {
 		return name
 	}
 	return filepath.Join(dir, name)
-}
-
-func short(sum string) string {
-	if len(sum) > 12 {
-		return sum[:12]
-	}
-	return sum
 }

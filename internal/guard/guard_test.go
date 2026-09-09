@@ -85,3 +85,59 @@ func TestSweepRemovesExpired(t *testing.T) {
 		t.Errorf("pendentes = %d, quero 0", pending)
 	}
 }
+
+func TestExpectSubtreeCoversDescendants(t *testing.T) {
+	g := New(time.Minute)
+	g.ExpectSubtree(event.SideB, "docs")
+
+	for _, p := range []string{"docs", "docs/a.txt", "docs/sub/b.txt"} {
+		if !g.Consume(event.Event{Side: event.SideB, Path: p}) {
+			t.Errorf("evento em %q deveria ter sido coberto pela subárvore", p)
+		}
+	}
+	// Prefixo textual não é descendente.
+	if g.Consume(event.Event{Side: event.SideB, Path: "docsx/a.txt"}) {
+		t.Error("\"docsx\" não está sob \"docs\" e não deveria ser coberto")
+	}
+	if g.Consume(event.Event{Side: event.SideA, Path: "docs/a.txt"}) {
+		t.Error("expectativa do lado B não deveria cobrir o lado A")
+	}
+}
+
+// Diferente de Expect, a expectativa de subárvore não tem contador: cobre um
+// número desconhecido de eventos até o TTL vencer.
+func TestExpectSubtreeIsNotConsumed(t *testing.T) {
+	g := New(time.Minute)
+	g.ExpectSubtree(event.SideA, "tree")
+
+	for i := range 50 {
+		if !g.Consume(event.Event{Side: event.SideA, Path: "tree/f.txt"}) {
+			t.Fatalf("evento %d deixou de ser coberto", i)
+		}
+	}
+}
+
+func TestForgetSubtreeStopsCoverage(t *testing.T) {
+	g := New(time.Minute)
+	g.ExpectSubtree(event.SideA, "tree")
+	g.ForgetSubtree(event.SideA, "tree")
+
+	if g.Consume(event.Event{Side: event.SideA, Path: "tree/f.txt"}) {
+		t.Error("subárvore esquecida não deveria cobrir mais nada")
+	}
+}
+
+func TestExpiredSubtreeLetsEventThrough(t *testing.T) {
+	g := New(time.Millisecond)
+	now := time.Now()
+	g.now = func() time.Time { return now }
+	g.ExpectSubtree(event.SideB, "tree")
+
+	g.now = func() time.Time { return now.Add(time.Hour) }
+	if g.Consume(event.Event{Side: event.SideB, Path: "tree/f.txt"}) {
+		t.Error("subárvore vencida não deveria cobrir o evento")
+	}
+	if n := g.Sweep(); n != 1 {
+		t.Errorf("Sweep() = %d, quero 1", n)
+	}
+}

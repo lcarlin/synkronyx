@@ -16,6 +16,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 
 	"github.com/lcarlin/synkronyx/internal/config"
@@ -28,11 +29,12 @@ import (
 	"github.com/lcarlin/synkronyx/internal/watcher"
 )
 
-// metaFirstSync é a chave em state.meta que marca o First Sync concluído.
-const metaFirstSync = "first_sync_completed_at"
-
 // sweepInterval é a periodicidade da limpeza de expectativas vencidas do guard.
 const sweepInterval = time.Minute
+
+// retryTick é a frequência com que a fila de retry é consultada. Não precisa
+// ser fina: o menor backoff configurável já é da ordem de segundos.
+const retryTick = time.Second
 
 // Engine coordena watchers, guard, estado e transferência.
 type Engine struct {
@@ -42,11 +44,13 @@ type Engine struct {
 	guard *guard.Guard
 	xfer  *transfer.Transfer
 	debo  *debounce.Debouncer
+	retry *retryQueue
 
 	watchers map[event.Side]*watcher.Watcher
 	roots    map[event.Side]string
 
 	resync chan string // pedidos de Full Resync, com o motivo
+	fatal  chan error  // falhas que exigem encerrar o serviço
 }
 
 // New monta o engine. Não toca em disco nem sobe watchers — isso é Run.
@@ -56,15 +60,17 @@ func New(cfg config.Config, db *state.DB, log *slog.Logger) *Engine {
 		log:      log,
 		db:       db,
 		guard:    guard.New(cfg.SelfWriteTTL),
-		xfer:     transfer.New(cfg.RsyncPath, cfg.RsyncArgs),
+		xfer:     transfer.New(cfg.RsyncPath, cfg.RsyncArgs, cfg.PreserveHardlinks),
 		debo:     debounce.New(cfg.Debounce),
+		retry:    newRetryQueue(cfg.RetryMaxAttempts, cfg.RetryInitialDelay, cfg.RetryMaxDelay),
 		watchers: make(map[event.Side]*watcher.Watcher, 2),
 		roots:    map[event.Side]string{event.SideA: cfg.A, event.SideB: cfg.B},
 		resync:   make(chan string, 1),
+		fatal:    make(chan error, 2),
 	}
 }
 
-// Run executa o serviço até ctx ser cancelado.
+// Run executa o serviço até ctx ser cancelado ou até uma falha terminal.
 //
 // A ordem importa e é a da seção 10 do escopo: watchers primeiro, First Sync
 // depois. Invertida, alterações ocorridas durante o scan não gerariam evento
@@ -91,7 +97,7 @@ func (e *Engine) Run(ctx context.Context) error {
 			return fmt.Errorf("iniciando watcher %s: %w", side, err)
 		}
 		go e.pump(ctx, w)
-		go e.watchOverflow(ctx, side, w)
+		go e.watchSignals(ctx, side, w)
 	}
 
 	if err := e.firstSync(ctx); err != nil {
@@ -124,11 +130,17 @@ func (e *Engine) pump(ctx context.Context, w *watcher.Watcher) {
 	}
 }
 
-func (e *Engine) watchOverflow(ctx context.Context, side event.Side, w *watcher.Watcher) {
+// watchSignals repassa overflow e falhas terminais de um watcher.
+func (e *Engine) watchSignals(ctx context.Context, side event.Side, w *watcher.Watcher) {
 	for {
 		select {
 		case <-w.Overflow():
 			e.RequestResync(fmt.Sprintf("overflow da fila do inotify no lado %s", side))
+		case err := <-w.Fatal():
+			select {
+			case e.fatal <- err:
+			default:
+			}
 		case <-ctx.Done():
 			return
 		}
@@ -147,6 +159,12 @@ func (e *Engine) RequestResync(reason string) {
 func (e *Engine) loop(ctx context.Context) error {
 	sweep := time.NewTicker(sweepInterval)
 	defer sweep.Stop()
+	beat := time.NewTicker(e.cfg.HeartbeatInterval)
+	defer beat.Stop()
+	retryT := time.NewTicker(retryTick)
+	defer retryT.Stop()
+
+	e.heartbeat(ctx)
 
 	for {
 		select {
@@ -154,12 +172,23 @@ func (e *Engine) loop(ctx context.Context) error {
 			e.debo.Close()
 			return nil
 
+		// Uma raiz que deixou de existir é terminal: continuar rodando
+		// deixaria um lado cego enquanto o outro segue propagando. Sair faz o
+		// systemd reiniciar o serviço, que é o comportamento correto.
+		case err := <-e.fatal:
+			e.debo.Close()
+			return err
+
 		case ev, ok := <-e.debo.Out():
 			if !ok {
 				return nil
 			}
+			// Um evento novo torna irrelevante qualquer tentativa pendente
+			// para o mesmo path.
+			e.retry.cancel(ev.Side, ev.Path)
 			if err := e.process(ctx, ev); err != nil {
-				e.log.Error("falha processando evento", "event", ev.String(), "err", err)
+				e.handleFailure(ctx, ev, err)
+				continue
 			}
 
 		case reason := <-e.resync:
@@ -168,6 +197,12 @@ func (e *Engine) loop(ctx context.Context) error {
 				e.log.Error("full resync falhou", "err", err)
 			}
 
+		case now := <-retryT.C:
+			e.processRetries(ctx, now)
+
+		case <-beat.C:
+			e.heartbeat(ctx)
+
 		case <-sweep.C:
 			if n := e.guard.Sweep(); n > 0 {
 				pending, matched, expired := e.guard.Stats()
@@ -175,6 +210,60 @@ func (e *Engine) loop(ctx context.Context) error {
 					"casadas", matched, "vencidas", expired)
 			}
 		}
+	}
+}
+
+// handleFailure decide o destino de um evento que falhou: reenfileirar com
+// backoff, ou desistir e marcar o estado.
+func (e *Engine) handleFailure(ctx context.Context, ev event.Event, cause error) {
+	if it := e.retry.schedule(ev, cause, time.Now()); it != nil {
+		e.log.Warn("falha ao propagar; reenfileirado",
+			"event", ev.String(), "tentativa", it.attempts,
+			"proxima_em", time.Until(it.nextAt).Round(time.Millisecond).String(), "err", cause)
+		return
+	}
+
+	e.log.Error("falha ao propagar; tentativas esgotadas",
+		"event", ev.String(), "max_tentativas", e.cfg.RetryMaxAttempts, "err", cause)
+	if err := e.db.MarkStatus(ctx, ev.Side, ev.Path, state.StatusError); err != nil {
+		e.log.Error("falha marcando estado de erro", "path", ev.Path, "err", err)
+	}
+	// Desistir de um path sem mais nada seria deixar uma divergência
+	// silenciosa; o resync é a rede de segurança.
+	e.RequestResync("tentativas esgotadas para " + ev.Path)
+}
+
+func (e *Engine) processRetries(ctx context.Context, now time.Time) {
+	for _, it := range e.retry.due(now) {
+		e.log.Info("retentando", "event", it.ev.String(), "tentativa", it.attempts)
+		if err := e.process(ctx, it.ev); err != nil {
+			e.handleFailure(ctx, it.ev, err)
+			continue
+		}
+		e.log.Info("retentativa bem-sucedida", "event", it.ev.String(), "tentativas", it.attempts)
+	}
+}
+
+// heartbeat publica no banco o estado operacional do daemon, para que
+// `synkronyx -status` possa reportá-lo sem precisar de IPC.
+//
+// Reaproveitar a tabela meta em vez de abrir um socket é a escolha KISS da
+// seção 16: o banco já existe, já é aberto pelo comando de status e não
+// acrescenta superfície de rede ao serviço.
+func (e *Engine) heartbeat(ctx context.Context) {
+	watches := 0
+	for _, w := range e.watchers {
+		watches += w.WatchCount()
+	}
+
+	kv := map[string]string{
+		state.MetaHeartbeat:  time.Now().Format(time.RFC3339),
+		state.MetaWatches:    strconv.Itoa(watches),
+		state.MetaRetryQueue: strconv.Itoa(e.retry.len()),
+		state.MetaPID:        strconv.Itoa(os.Getpid()),
+	}
+	if err := e.db.SetMetaMany(ctx, kv); err != nil {
+		e.log.Warn("falha publicando heartbeat", "err", err)
 	}
 }
 
@@ -247,18 +336,13 @@ func (e *Engine) alreadySynced(ctx context.Context, ev event.Event, srcAbs strin
 		return false, nil
 	}
 	// Metadados batem com o último estado sincronizado e os dois lados
-	// registram o mesmo hash: nada a fazer.
-	return srcEntry.SHA256 != "" && srcEntry.SHA256 == dstEntry.SHA256, nil
+	// registram o mesmo digest: nada a fazer.
+	return hash.Compare(srcEntry.Digest, dstEntry.Digest) == hash.Same, nil
 }
 
 func (e *Engine) propagateContent(ctx context.Context, ev event.Event, srcAbs, dstAbs string) error {
 	if ev.IsDir {
-		e.guard.Expect(ev.Side.Opposite(), ev.Path, 1)
-		if err := e.xfer.Mkdir(srcAbs, dstAbs); err != nil {
-			e.guard.Forget(ev.Side.Opposite(), ev.Path)
-			return err
-		}
-		return e.recordPair(ctx, ev.Path, srcAbs, dstAbs, true)
+		return e.propagateDir(ctx, ev, srcAbs, dstAbs)
 	}
 
 	conflict, err := e.detectConflict(ctx, ev, srcAbs, dstAbs)
@@ -271,27 +355,72 @@ func (e *Engine) propagateContent(ctx context.Context, ev event.Event, srcAbs, d
 
 	// Uma cópia de arquivo gera tipicamente CREATE + CLOSE_WRITE + ATTRIB no
 	// destino; a expectativa cobre os três.
-	e.guard.Expect(ev.Side.Opposite(), ev.Path, 3)
+	dst := ev.Side.Opposite()
+	e.guard.Expect(dst, ev.Path, 3)
 	if err := e.xfer.CopyFile(ctx, srcAbs, dstAbs); err != nil {
-		e.guard.Forget(ev.Side.Opposite(), ev.Path)
+		e.guard.Forget(dst, ev.Path)
 		return err
 	}
 	return e.recordPair(ctx, ev.Path, srcAbs, dstAbs, false)
 }
 
-func (e *Engine) propagateDelete(ctx context.Context, ev event.Event, dstAbs string) error {
-	e.guard.Expect(ev.Side.Opposite(), ev.Path, 1)
-	if err := e.xfer.Remove(dstAbs, ev.IsDir); err != nil {
-		e.guard.Forget(ev.Side.Opposite(), ev.Path)
+// propagateDir cria o diretório no destino. Se a origem já tiver conteúdo,
+// copia a árvore inteira em uma única invocação de rsync — que é também a
+// única forma de --hard-links surtir efeito.
+func (e *Engine) propagateDir(ctx context.Context, ev event.Event, srcAbs, dstAbs string) error {
+	dst := ev.Side.Opposite()
+
+	empty, err := isEmptyDir(srcAbs)
+	if err != nil {
 		return err
 	}
+
+	// A cópia de árvore toca um número indeterminado de paths no destino.
+	e.guard.ExpectSubtree(dst, ev.Path)
+	defer e.guard.ForgetSubtree(dst, ev.Path)
+
+	if empty {
+		if err := e.xfer.Mkdir(srcAbs, dstAbs); err != nil {
+			return err
+		}
+	} else if err := e.xfer.CopyTree(ctx, srcAbs, dstAbs); err != nil {
+		return err
+	}
+
+	if err := e.recordPair(ctx, ev.Path, srcAbs, dstAbs, true); err != nil {
+		return err
+	}
+	if empty {
+		return nil
+	}
+	// O conteúdo copiado também precisa entrar no estado, senão o primeiro
+	// evento em cada arquivo o trataria como desconhecido.
+	return e.recordSubtree(ctx, ev.Path)
+}
+
+func (e *Engine) propagateDelete(ctx context.Context, ev event.Event, dstAbs string) error {
+	dst := ev.Side.Opposite()
+
 	if ev.IsDir {
+		// Remover recursivamente gera um evento por entrada apagada.
+		e.guard.ExpectSubtree(dst, ev.Path)
+		defer e.guard.ForgetSubtree(dst, ev.Path)
+
+		if err := e.removeDir(ctx, dst, ev.Path, dstAbs); err != nil {
+			return err
+		}
 		return e.db.DeleteSubtree(ctx, ev.Path)
+	}
+
+	e.guard.Expect(dst, ev.Path, 1)
+	if err := e.xfer.Remove(dstAbs, false); err != nil {
+		e.guard.Forget(dst, ev.Path)
+		return err
 	}
 	if err := e.db.Delete(ctx, ev.Side, ev.Path); err != nil {
 		return err
 	}
-	return e.db.Delete(ctx, ev.Side.Opposite(), ev.Path)
+	return e.db.Delete(ctx, dst, ev.Path)
 }
 
 func (e *Engine) propagateMove(ctx context.Context, ev event.Event) error {
@@ -299,21 +428,36 @@ func (e *Engine) propagateMove(ctx context.Context, ev event.Event) error {
 	fromAbs := e.abs(dst, ev.From)
 	toAbs := e.abs(dst, ev.Path)
 
-	// O rename toca dois paths no destino: MOVED_FROM em um, MOVED_TO no outro.
-	e.guard.Expect(dst, ev.From, 1)
-	e.guard.Expect(dst, ev.Path, 1)
+	// O rename toca dois paths no destino: MOVED_FROM em um, MOVED_TO no
+	// outro. Para diretórios, todo o conteúdo muda de path junto.
+	if ev.IsDir {
+		e.guard.ExpectSubtree(dst, ev.From)
+		e.guard.ExpectSubtree(dst, ev.Path)
+		defer e.guard.ForgetSubtree(dst, ev.From)
+		defer e.guard.ForgetSubtree(dst, ev.Path)
+	} else {
+		e.guard.Expect(dst, ev.From, 1)
+		e.guard.Expect(dst, ev.Path, 1)
+	}
 
 	if err := e.xfer.Move(fromAbs, toAbs); err != nil {
-		e.guard.Forget(dst, ev.From)
-		e.guard.Forget(dst, ev.Path)
+		if !ev.IsDir {
+			e.guard.Forget(dst, ev.From)
+			e.guard.Forget(dst, ev.Path)
+		}
 
 		// A origem pode não existir no destino — estado divergente. Em vez de
-		// insistir no rename, degradar para uma cópia do path de destino é
-		// a resposta segura.
+		// insistir no rename, reconciliar a subárvore é a resposta correta:
+		// para um arquivo é equivalente a copiá-lo, e para um diretório
+		// resolve também o conteúdo, que uma cópia simples do path deixaria
+		// pela metade.
 		if errors.Is(err, os.ErrNotExist) {
-			e.log.Warn("origem do rename ausente no destino; copiando", "from", ev.From, "to", ev.Path)
-			copyEv := event.Event{Side: ev.Side, Kind: event.KindCreate, Path: ev.Path, IsDir: ev.IsDir, At: ev.At}
-			return e.propagateContent(ctx, copyEv, e.abs(ev.Side, ev.Path), toAbs)
+			e.log.Warn("origem do rename ausente no destino; reconciliando subárvore",
+				"from", ev.From, "to", ev.Path, "is_dir", ev.IsDir)
+			if err := e.db.DeleteSubtree(ctx, ev.From); err != nil {
+				return err
+			}
+			return e.reconcileSubtree(ctx, ev.Path)
 		}
 		return err
 	}
@@ -321,54 +465,133 @@ func (e *Engine) propagateMove(ctx context.Context, ev event.Event) error {
 	if err := e.db.DeleteSubtree(ctx, ev.From); err != nil {
 		return err
 	}
-	return e.recordPair(ctx, ev.Path, e.abs(ev.Side, ev.Path), toAbs, ev.IsDir)
+	if err := e.recordPair(ctx, ev.Path, e.abs(ev.Side, ev.Path), toAbs, ev.IsDir); err != nil {
+		return err
+	}
+	if !ev.IsDir {
+		return nil
+	}
+	// Os paths de todo o conteúdo mudaram; o estado precisa acompanhar.
+	if err := e.db.DeleteSubtree(ctx, ev.Path); err != nil {
+		return err
+	}
+	if err := e.recordPair(ctx, ev.Path, e.abs(ev.Side, ev.Path), toAbs, true); err != nil {
+		return err
+	}
+	return e.recordSubtree(ctx, ev.Path)
 }
 
 func (e *Engine) propagateAttrs(ctx context.Context, ev event.Event, srcAbs, dstAbs string) error {
-	e.guard.Expect(ev.Side.Opposite(), ev.Path, 1)
+	dst := ev.Side.Opposite()
+	e.guard.Expect(dst, ev.Path, 1)
 	if err := e.xfer.SyncAttrs(ctx, srcAbs, dstAbs); err != nil {
-		e.guard.Forget(ev.Side.Opposite(), ev.Path)
+		e.guard.Forget(dst, ev.Path)
 		return err
 	}
 	return e.recordPair(ctx, ev.Path, srcAbs, dstAbs, ev.IsDir)
+}
+
+// digestOf calcula o digest de abs conforme a configuração de amostragem.
+func (e *Engine) digestOf(abs string) (hash.Digest, error) {
+	return hash.Compute(abs, e.cfg.HashMaxBytes, e.cfg.HashSampleBytes)
+}
+
+// entryFor monta a entrada de estado de um path absoluto.
+func (e *Engine) entryFor(side event.Side, rel, abs string, at time.Time) (state.Entry, error) {
+	st, err := hash.StatOf(abs)
+	if err != nil {
+		return state.Entry{}, err
+	}
+	entry := state.Entry{
+		Path: rel, Side: side, IsDir: st.IsDir, Size: st.Size,
+		MTime: st.MTime, Mode: st.Mode, SyncedAt: at, Status: state.StatusSynced,
+	}
+	if !st.IsDir {
+		d, err := e.digestOf(abs)
+		if err != nil {
+			return state.Entry{}, err
+		}
+		entry.Digest = d
+	}
+	return entry, nil
 }
 
 // recordPair grava o estado dos dois lados após uma propagação bem-sucedida.
 func (e *Engine) recordPair(ctx context.Context, rel, srcAbs, dstAbs string, isDir bool) error {
 	now := time.Now()
 
-	build := func(side event.Side, abs string) (state.Entry, error) {
-		st, err := hash.StatOf(abs)
-		if err != nil {
-			return state.Entry{}, err
-		}
-		entry := state.Entry{
-			Path: rel, Side: side, IsDir: st.IsDir, Size: st.Size,
-			MTime: st.MTime, Mode: st.Mode, SyncedAt: now, Status: state.StatusSynced,
-		}
-		if !st.IsDir {
-			sum, ok, err := hash.FileLimited(abs, e.cfg.HashMaxBytes)
-			if err != nil {
-				return state.Entry{}, err
-			}
-			if ok {
-				entry.SHA256 = sum
-			}
-		}
-		return entry, nil
-	}
-
-	// Determinar qual abs pertence a qual lado a partir das raízes.
-	srcSide, dstSide := e.sideOf(srcAbs), e.sideOf(dstAbs)
-	srcEntry, err := build(srcSide, srcAbs)
+	srcEntry, err := e.entryFor(e.sideOf(srcAbs), rel, srcAbs, now)
 	if err != nil {
 		return err
 	}
-	dstEntry, err := build(dstSide, dstAbs)
+	dstEntry, err := e.entryFor(e.sideOf(dstAbs), rel, dstAbs, now)
 	if err != nil {
 		return err
 	}
 	return e.db.PutBoth(ctx, srcEntry, dstEntry)
+}
+
+// recordSubtree grava o estado de tudo sob rel, nos dois lados. Usado depois
+// de operações que movem ou copiam árvores inteiras de uma vez.
+func (e *Engine) recordSubtree(ctx context.Context, rel string) error {
+	excluder := config.NewExcluder(e.cfg.Exclude)
+	now := time.Now()
+
+	for _, side := range []event.Side{event.SideA, event.SideB} {
+		root := e.roots[side]
+		start := root
+		if rel != "." && rel != "" {
+			start = filepath.Join(root, rel)
+		}
+
+		err := filepath.WalkDir(start, func(abs string, d os.DirEntry, err error) error {
+			if err != nil {
+				if errors.Is(err, os.ErrNotExist) {
+					return nil
+				}
+				return err
+			}
+			r, err := filepath.Rel(root, abs)
+			if err != nil {
+				return err
+			}
+			if excluder.Excluded(r, d.IsDir()) {
+				if d.IsDir() {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			entry, err := e.entryFor(side, r, abs, now)
+			if err != nil {
+				if errors.Is(err, os.ErrNotExist) {
+					return nil
+				}
+				return err
+			}
+			return e.db.Put(ctx, entry)
+		})
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	return nil
+}
+
+func isEmptyDir(abs string) (bool, error) {
+	f, err := os.Open(abs)
+	if err != nil {
+		return false, err
+	}
+	defer f.Close()
+
+	names, err := f.Readdirnames(1)
+	if err != nil && err.Error() != "EOF" {
+		if len(names) == 0 {
+			return true, nil
+		}
+		return false, err
+	}
+	return len(names) == 0, nil
 }
 
 func (e *Engine) abs(side event.Side, rel string) string {

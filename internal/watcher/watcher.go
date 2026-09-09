@@ -61,6 +61,7 @@ type Watcher struct {
 
 	out      chan event.Event
 	overflow chan struct{}
+	fatal    chan error
 
 	mu      sync.Mutex
 	pending map[uint32]*pendingMove // cookie -> metade de um rename ainda sem par
@@ -93,6 +94,7 @@ func New(opts Options) (*Watcher, error) {
 		log:      opts.Logger.With("side", opts.Side.String()),
 		out:      make(chan event.Event, 1024),
 		overflow: make(chan struct{}, 1),
+		fatal:    make(chan error, 1),
 		pending:  make(map[uint32]*pendingMove),
 	}, nil
 }
@@ -103,6 +105,24 @@ func (w *Watcher) Events() <-chan event.Event { return w.out }
 // Overflow sinaliza que a fila do kernel estourou e eventos foram perdidos.
 // O engine deve responder com um Full Resync.
 func (w *Watcher) Overflow() <-chan struct{} { return w.overflow }
+
+// Fatal sinaliza que este watcher não tem mais como observar sua raiz — ela
+// foi removida, movida ou desmontada.
+//
+// Continuar rodando nessa condição seria pior que parar: o lado afetado fica
+// cego, e o engine seguiria propagando alterações do outro lado como se
+// tudo estivesse normal. O serviço deve encerrar e deixar o systemd
+// reiniciá-lo, quando a raiz voltar a existir.
+func (w *Watcher) Fatal() <-chan error { return w.fatal }
+
+// raiseFatal publica a falha terminal. Não bloqueia: o primeiro motivo é o
+// que importa.
+func (w *Watcher) raiseFatal(err error) {
+	select {
+	case w.fatal <- err:
+	default:
+	}
+}
 
 // Start registra a árvore inteira e começa a consumir eventos.
 //
@@ -123,6 +143,11 @@ func (w *Watcher) Start(ctx context.Context) error {
 	}()
 	return nil
 }
+
+// WatchCount é o número de diretórios sob observação. Serve ao relatório de
+// status: comparado com fs.inotify.max_user_watches, diz se a árvore está
+// perto do limite do kernel.
+func (w *Watcher) WatchCount() int { return w.tree.size() }
 
 // Stop encerra o watcher e espera o loop terminar.
 func (w *Watcher) Stop() error {
@@ -193,6 +218,13 @@ func (w *Watcher) handle(ctx context.Context, raw inotify.Event) {
 		}
 		return
 	}
+	if raw.Is(unix.IN_UNMOUNT) {
+		if dir, ok := w.tree.pathOf(raw.Wd); ok && dir == "." {
+			w.raiseFatal(fmt.Errorf("lado %s: filesystem de %s foi desmontado",
+				w.opts.Side, w.opts.Root))
+			return
+		}
+	}
 	if raw.Is(unix.IN_IGNORED) {
 		w.tree.remove(raw.Wd)
 		return
@@ -245,10 +277,21 @@ func (w *Watcher) handle(ctx context.Context, raw inotify.Event) {
 			}
 		}
 		if raw.Is(unix.IN_DELETE_SELF) && rel == "." {
-			w.log.Error("raiz observada foi removida", "root", w.opts.Root)
+			w.raiseFatal(fmt.Errorf("lado %s: a raiz observada %s foi removida",
+				w.opts.Side, w.opts.Root))
 			return
 		}
 		w.emit(ctx, event.Event{Side: w.opts.Side, Kind: event.KindDelete, Path: rel, IsDir: isDir, At: now})
+
+	case raw.Is(unix.IN_MOVE_SELF):
+		if rel == "." {
+			// O wd continua válido, mas passou a apontar para um caminho que
+			// não é mais o configurado: tudo o que fosse escrito ali iria
+			// para o lugar errado.
+			w.raiseFatal(fmt.Errorf("lado %s: a raiz observada %s foi movida",
+				w.opts.Side, w.opts.Root))
+			return
+		}
 
 	case raw.Is(unix.IN_ATTRIB):
 		w.emit(ctx, event.Event{Side: w.opts.Side, Kind: event.KindAttrib, Path: rel, IsDir: isDir, At: now})

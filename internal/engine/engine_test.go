@@ -259,8 +259,8 @@ func TestFirstSyncReconcilesPreexistingTrees(t *testing.T) {
 	// refaria tudo do zero. A gravação acontece logo depois de o arquivo
 	// aparecer, então vale esperar por ela em vez de ler uma vez só.
 	entry := waitEntry(t, db, event.SideB, filepath.Join("sub", "so-em-a.txt"))
-	if entry.SHA256 == "" {
-		t.Error("entrada gravada sem hash")
+	if entry.Digest.IsZero() {
+		t.Error("entrada gravada sem digest")
 	}
 	if entry.Status != state.StatusSynced {
 		t.Errorf("status = %q, quero %q", entry.Status, state.StatusSynced)
@@ -298,5 +298,149 @@ func assertNoConflictFiles(t *testing.T, root string) {
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+// TestRetryRecoversFromTransientFailure cobre a fila de retry: uma falha
+// passageira de transferência não pode exigir um Full Resync para se
+// resolver, nem descartar a alteração.
+func TestRetryRecoversFromTransientFailure(t *testing.T) {
+	realRsync, err := exec.LookPath("rsync")
+	if err != nil {
+		t.Skip("rsync não disponível")
+	}
+
+	dir := t.TempDir()
+	counter := filepath.Join(dir, "contador")
+	fake := filepath.Join(dir, "rsync-instavel")
+
+	// Falha as duas primeiras transferências e delega o resto ao rsync real.
+	// --version passa direto, senão a checagem de partida do engine falharia.
+	script := "#!/bin/sh\n" +
+		"for a in \"$@\"; do [ \"$a\" = \"--version\" ] && exec " + realRsync + " \"$@\"; done\n" +
+		"n=$(cat " + counter + " 2>/dev/null || echo 0)\n" +
+		"n=$((n+1)); echo \"$n\" > " + counter + "\n" +
+		"if [ \"$n\" -le 2 ]; then echo \"falha simulada $n\" >&2; exit 11; fi\n" +
+		"exec " + realRsync + " \"$@\"\n"
+	if err := os.WriteFile(fake, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	h := newHarness(t, func(c *config.Config) {
+		c.RsyncPath = fake
+		c.RetryMaxAttempts = 6
+		c.RetryInitialDelay = 150 * time.Millisecond
+		c.RetryMaxDelay = time.Second
+	})
+
+	if err := os.WriteFile(filepath.Join(h.A, "teimoso.txt"), []byte("persistente"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Só chega ao destino se as tentativas seguintes acontecerem.
+	waitContent(t, filepath.Join(h.B, "teimoso.txt"), "persistente")
+
+	got, err := os.ReadFile(counter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := strings.TrimSpace(string(got)); n != "3" {
+		t.Errorf("invocações do rsync = %s, quero 3 (duas falhas + o acerto)", n)
+	}
+}
+
+// Esgotadas as tentativas, o path fica marcado e um resync é solicitado —
+// nunca um descarte silencioso.
+func TestRetryGiveUpMarksErrorState(t *testing.T) {
+	realRsync, err := exec.LookPath("rsync")
+	if err != nil {
+		t.Skip("rsync não disponível")
+	}
+
+	dir := t.TempDir()
+	fake := filepath.Join(dir, "rsync-quebrado")
+	script := "#!/bin/sh\n" +
+		"for a in \"$@\"; do [ \"$a\" = \"--version\" ] && exec " + realRsync + " \"$@\"; done\n" +
+		"echo 'falha permanente' >&2; exit 11\n"
+	if err := os.WriteFile(fake, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	h := newHarness(t, func(c *config.Config) {
+		c.RsyncPath = fake
+		c.RetryMaxAttempts = 2
+		c.RetryInitialDelay = 50 * time.Millisecond
+		c.RetryMaxDelay = 100 * time.Millisecond
+	})
+
+	if err := os.WriteFile(filepath.Join(h.A, "impossivel.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		entry, err := h.db.Get(context.Background(), event.SideA, "impossivel.txt")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if entry != nil && entry.Status == state.StatusError {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	// Sem entrada prévia no estado não há o que marcar; o que não pode
+	// acontecer é o arquivo ter sido copiado apesar do rsync quebrado.
+	if _, err := os.Stat(filepath.Join(h.B, "impossivel.txt")); err == nil {
+		t.Fatal("arquivo apareceu no destino apesar de o rsync sempre falhar")
+	}
+}
+
+// A raiz sumir é terminal: Run precisa retornar erro para o systemd
+// reiniciar, em vez de seguir com um lado cego.
+func TestEngineStopsWhenRootDisappears(t *testing.T) {
+	if _, err := exec.LookPath("rsync"); err != nil {
+		t.Skip("rsync não disponível")
+	}
+
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.A = filepath.Join(dir, "A")
+	cfg.B = filepath.Join(dir, "B")
+	cfg.StatePath = filepath.Join(dir, "state.db")
+	cfg.Debounce = 50 * time.Millisecond
+	for _, root := range []string{cfg.A, cfg.B} {
+		if err := os.MkdirAll(root, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	db, err := state.Open(cfg.StatePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	eng := New(cfg, db, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() { done <- eng.Run(ctx) }()
+	time.Sleep(500 * time.Millisecond)
+
+	if err := os.RemoveAll(cfg.A); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("Run devolveu nil; a perda da raiz precisa ser reportada como erro")
+		}
+		if !strings.Contains(err.Error(), "raiz") {
+			t.Errorf("erro = %q, quero menção à raiz", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run não encerrou após a raiz sumir")
 	}
 }

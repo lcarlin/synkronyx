@@ -20,17 +20,22 @@ import (
 
 // Transfer aplica operações no filesystem destino.
 type Transfer struct {
-	rsyncPath string
-	rsyncArgs []string
+	rsyncPath         string
+	rsyncArgs         []string
+	preserveHardlinks bool
 }
 
 // New cria um Transfer. args são as opções base passadas ao rsync em toda
 // invocação (ver config.Default).
-func New(rsyncPath string, args []string) *Transfer {
+func New(rsyncPath string, args []string, preserveHardlinks bool) *Transfer {
 	if rsyncPath == "" {
 		rsyncPath = "rsync"
 	}
-	return &Transfer{rsyncPath: rsyncPath, rsyncArgs: append([]string(nil), args...)}
+	return &Transfer{
+		rsyncPath:         rsyncPath,
+		rsyncArgs:         append([]string(nil), args...),
+		preserveHardlinks: preserveHardlinks,
+	}
 }
 
 // Check valida que o rsync existe e é executável. Falhar cedo, na subida do
@@ -64,11 +69,30 @@ func (t *Transfer) CopyFile(ctx context.Context, src, dst string) error {
 // A barra final em src é significativa para o rsync: com ela, copia-se o
 // *conteúdo* de src para dentro de dst; sem ela, copia-se o diretório src
 // como filho de dst. Aqui queremos sempre a primeira forma.
+//
+// # Hardlinks
+//
+// --hard-links só preserva ligações que o rsync consegue ver dentro de uma
+// mesma invocação. Por isso a opção é aplicada aqui, na cópia de árvore
+// (First Sync, Full Resync, propagação de diretório novo), e não em CopyFile:
+// dois arquivos ligados que chegam por eventos separados são copiados por
+// invocações separadas, e nesse caminho a ligação se perde — viram dois
+// arquivos independentes com o mesmo conteúdo.
+//
+// Ou seja: a preservação é de melhor esforço, garantida no scan e não na
+// propagação incremental. Quem depende de hardlinks deve contar com o Full
+// Resync para restabelecê-los.
 func (t *Transfer) CopyTree(ctx context.Context, src, dst string) error {
 	if err := os.MkdirAll(dst, 0o755); err != nil {
 		return fmt.Errorf("criando diretório de destino: %w", err)
 	}
-	return t.rsync(ctx, strings.TrimSuffix(src, "/")+"/", dst)
+
+	args := append([]string(nil), t.rsyncArgs...)
+	if t.preserveHardlinks {
+		args = append(args, "--hard-links")
+	}
+	args = append(args, strings.TrimSuffix(src, "/")+"/", dst)
+	return t.run(ctx, args)
 }
 
 // Mkdir cria um diretório no destino, copiando o modo da origem.

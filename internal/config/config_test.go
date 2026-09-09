@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestValidateRejectsNestedRoots(t *testing.T) {
@@ -102,5 +103,94 @@ func TestExcluderMatchesAnyPathComponent(t *testing.T) {
 		if got := e.Excluded(c.rel, false); got != c.want {
 			t.Errorf("Excluded(%q) = %v, quero %v", c.rel, got, c.want)
 		}
+	}
+}
+
+func TestValidateRejectsSampleLargerThanLimit(t *testing.T) {
+	dir := t.TempDir()
+	a, b := filepath.Join(dir, "A"), filepath.Join(dir, "B")
+	for _, p := range []string{a, b} {
+		if err := os.MkdirAll(p, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	cfg := Default()
+	cfg.A, cfg.B = a, b
+	cfg.HashMaxBytes = 1000
+	cfg.HashSampleBytes = 800 // 2x800 > 1000: a amostra cobriria o arquivo todo
+
+	err := cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "hash_sample_bytes") {
+		t.Fatalf("Validate() = %v, quero erro sobre a amostra", err)
+	}
+}
+
+func TestValidateRejectsInconsistentRetryDelays(t *testing.T) {
+	dir := t.TempDir()
+	a, b := filepath.Join(dir, "A"), filepath.Join(dir, "B")
+	for _, p := range []string{a, b} {
+		if err := os.MkdirAll(p, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	cfg := Default()
+	cfg.A, cfg.B = a, b
+	cfg.RetryInitialDelay = time.Minute
+	cfg.RetryMaxDelay = time.Second
+
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("Validate() aceitou retry_max_delay menor que o inicial")
+	}
+}
+
+func TestValidateAcceptsRetryDisabled(t *testing.T) {
+	dir := t.TempDir()
+	a, b := filepath.Join(dir, "A"), filepath.Join(dir, "B")
+	for _, p := range []string{a, b} {
+		if err := os.MkdirAll(p, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	cfg := Default()
+	cfg.A, cfg.B = a, b
+	cfg.RetryMaxAttempts = 0
+
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() = %v, quero nil com retry desligado", err)
+	}
+}
+
+func TestExampleConfigIsValid(t *testing.T) {
+	// O exemplo é a primeira coisa que alguém copia; ele quebrar é uma falha
+	// de verdade, não um detalhe de documentação.
+	raw, err := os.ReadFile(filepath.Join("..", "..", "configs", "synkronyx.example.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	dir := t.TempDir()
+	a, b := filepath.Join(dir, "A"), filepath.Join(dir, "B")
+	for _, p := range []string{a, b} {
+		if err := os.MkdirAll(p, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// As raízes do exemplo não existem na máquina de teste; o resto do
+	// arquivo é o que interessa validar.
+	body := strings.ReplaceAll(string(raw), "a: /dados/A", "a: "+a)
+	body = strings.ReplaceAll(body, "b: /dados/B", "b: "+b)
+	body = strings.ReplaceAll(body, "state_path: /var/lib/synkronyx/state.db",
+		"state_path: "+filepath.Join(dir, "state.db"))
+
+	path := filepath.Join(dir, "exemplo.yaml")
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err != nil {
+		t.Fatalf("configs/synkronyx.example.yaml não passa na validação: %v", err)
 	}
 }

@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/lcarlin/synkronyx/internal/hash"
+
 	"gopkg.in/yaml.v3"
 )
 
@@ -46,9 +48,43 @@ type Config struct {
 	// LogLevel: debug|info|warn|error.
 	LogLevel string `yaml:"log_level"`
 
-	// HashMaxBytes limita o cálculo de SHA-256 sob demanda. 0 = sem limite.
+	// HashMaxBytes é o tamanho a partir do qual o digest passa a ser
+	// amostrado em vez de completo. 0 = sempre completo.
 	HashMaxBytes int64 `yaml:"hash_max_bytes"`
+
+	// HashSampleBytes é quanto se lê de cada extremidade no digest amostrado.
+	HashSampleBytes int64 `yaml:"hash_sample_bytes"`
+
+	// PreserveHardlinks adiciona --hard-links ao rsync nas cópias de árvore.
+	// Ver a nota em transfer.CopyTree sobre o alcance real da opção.
+	PreserveHardlinks bool `yaml:"preserve_hardlinks"`
+
+	// DirDeletePolicy decide o que fazer ao propagar a remoção de um
+	// diretório que, no destino, contém conteúdo que nunca foi sincronizado.
+	DirDeletePolicy DirDeletePolicy `yaml:"dir_delete_policy"`
+
+	// Retry* controlam a fila de reenvio de operações que falharam.
+	RetryMaxAttempts  int           `yaml:"retry_max_attempts"`
+	RetryInitialDelay time.Duration `yaml:"retry_initial_delay"`
+	RetryMaxDelay     time.Duration `yaml:"retry_max_delay"`
+
+	// HeartbeatInterval é a periodicidade com que o daemon publica seu
+	// estado operacional no banco, para o -status poder lê-lo.
+	HeartbeatInterval time.Duration `yaml:"heartbeat_interval"`
 }
+
+// DirDeletePolicy — resposta ao caso da seção 16 (Fail Safe) em que a remoção
+// de um diretório apagaria dados que só existem no destino.
+type DirDeletePolicy string
+
+const (
+	// DirDeletePreserveUnknown remove o diretório, mas antes salva em um
+	// diretório de conflito tudo o que o estado não conhece — isto é, o que
+	// foi criado no destino e nunca chegou à origem. É o padrão.
+	DirDeletePreserveUnknown DirDeletePolicy = "preserve-unknown"
+	// DirDeleteForce remove o diretório inteiro sem inspecionar.
+	DirDeleteForce DirDeletePolicy = "force"
+)
 
 // ConflictPolicy — política inicial recomendada pelo escopo é Preserve.
 type ConflictPolicy string
@@ -88,6 +124,16 @@ func Default() Config {
 		RsyncArgs:       []string{"--archive", "--partial", "--inplace", "--numeric-ids"},
 		LogLevel:        "info",
 		Exclude:         []string{".synkronyx", "*.sync-conflict-*"},
+
+		HashSampleBytes:   hash.DefaultSampleBytes,
+		PreserveHardlinks: false,
+		DirDeletePolicy:   DirDeletePreserveUnknown,
+
+		RetryMaxAttempts:  5,
+		RetryInitialDelay: 2 * time.Second,
+		RetryMaxDelay:     5 * time.Minute,
+
+		HeartbeatInterval: 30 * time.Second,
 	}
 }
 
@@ -170,6 +216,38 @@ func (c Config) Validate() error {
 	case FirstSyncUnion, FirstSyncAWins, FirstSyncBWins:
 	default:
 		errs = append(errs, fmt.Errorf("first_sync_policy inválida: %q", c.FirstSyncPolicy))
+	}
+	switch c.DirDeletePolicy {
+	case DirDeletePreserveUnknown, DirDeleteForce:
+	default:
+		errs = append(errs, fmt.Errorf("dir_delete_policy inválida: %q", c.DirDeletePolicy))
+	}
+	if c.HashMaxBytes < 0 {
+		errs = append(errs, errors.New("hash_max_bytes não pode ser negativo"))
+	}
+	if c.HashMaxBytes > 0 && c.HashSampleBytes <= 0 {
+		errs = append(errs, errors.New("hash_sample_bytes deve ser > 0 quando hash_max_bytes está ativo"))
+	}
+	if c.HashMaxBytes > 0 && c.HashSampleBytes*2 >= c.HashMaxBytes {
+		// Amostrar 2x mais do que o limite significa ler o arquivo todo de
+		// qualquer jeito: a configuração não faria o que promete.
+		errs = append(errs, fmt.Errorf(
+			"hash_sample_bytes (%d) x2 deve ser menor que hash_max_bytes (%d), senão a amostra cobre o arquivo inteiro",
+			c.HashSampleBytes, c.HashMaxBytes))
+	}
+	if c.RetryMaxAttempts < 0 {
+		errs = append(errs, errors.New("retry_max_attempts não pode ser negativo"))
+	}
+	if c.RetryMaxAttempts > 0 {
+		if c.RetryInitialDelay <= 0 {
+			errs = append(errs, errors.New("retry_initial_delay deve ser > 0"))
+		}
+		if c.RetryMaxDelay < c.RetryInitialDelay {
+			errs = append(errs, errors.New("retry_max_delay deve ser >= retry_initial_delay"))
+		}
+	}
+	if c.HeartbeatInterval <= 0 {
+		errs = append(errs, errors.New("heartbeat_interval deve ser > 0"))
 	}
 
 	return errors.Join(errs...)

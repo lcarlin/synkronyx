@@ -31,6 +31,22 @@ const (
 	StatusError    = "error"
 )
 
+// Chaves conhecidas da tabela meta.
+const (
+	// MetaFirstSync guarda quando o First Sync concluiu.
+	MetaFirstSync = "first_sync_completed_at"
+	// MetaLastResync guarda quando o último Full Resync concluiu.
+	MetaLastResync = "last_full_resync_at"
+	// MetaHeartbeat guarda o instante do último heartbeat do daemon.
+	MetaHeartbeat = "heartbeat_at"
+	// MetaWatches guarda o número de diretórios observados no último heartbeat.
+	MetaWatches = "watch_count"
+	// MetaRetryQueue guarda o tamanho da fila de retry no último heartbeat.
+	MetaRetryQueue = "retry_queue_len"
+	// MetaPID guarda o PID do processo que está rodando.
+	MetaPID = "pid"
+)
+
 // Entry é o último estado conhecido de um path em um dos lados.
 type Entry struct {
 	Path     string
@@ -39,7 +55,7 @@ type Entry struct {
 	Size     int64
 	MTime    time.Time
 	Mode     os.FileMode
-	SHA256   string // vazio se não calculado
+	Digest   hash.Digest
 	SyncedAt time.Time
 	Status   string
 }
@@ -52,7 +68,7 @@ func (e Entry) Stat() hash.Stat {
 // DB é o estado persistente.
 type DB struct{ db *sql.DB }
 
-// Open abre (criando se preciso) o banco em path e aplica o schema.
+// Open abre (criando se preciso) o banco em path, aplica o schema e migra.
 func Open(path string) (*DB, error) {
 	if dir := filepath.Dir(path); dir != "" && dir != "." {
 		if err := os.MkdirAll(dir, 0o750); err != nil {
@@ -60,7 +76,9 @@ func Open(path string) (*DB, error) {
 		}
 	}
 
-	sqlDB, err := sql.Open("sqlite", path+"?_pragma=busy_timeout(5000)")
+	dsn := path + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)" +
+		"&_pragma=synchronous(NORMAL)&_pragma=foreign_keys(ON)"
+	sqlDB, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("abrindo estado %s: %w", path, err)
 	}
@@ -72,66 +90,90 @@ func Open(path string) (*DB, error) {
 		sqlDB.Close()
 		return nil, fmt.Errorf("aplicando schema: %w", err)
 	}
+	if err := migrate(sqlDB); err != nil {
+		sqlDB.Close()
+		return nil, err
+	}
 	return &DB{db: sqlDB}, nil
 }
 
 func (d *DB) Close() error { return d.db.Close() }
 
-// Get devolve a entrada de (path, side). Devolve (nil, nil) se não existir.
-func (d *DB) Get(ctx context.Context, side event.Side, path string) (*Entry, error) {
-	row := d.db.QueryRowContext(ctx, `
-		SELECT path, side, is_dir, size, mtime_ns, mode, COALESCE(sha256, ''), synced_at, status
-		FROM entries WHERE path = ? AND side = ?`, path, int(side))
+const entryColumns = `path, side, is_dir, size, mtime_ns, mode, COALESCE(digest, ''), synced_at, status`
 
+// scanEntry lê uma linha na ordem de entryColumns.
+func scanEntry(sc interface{ Scan(...any) error }) (Entry, error) {
 	var (
 		e       Entry
 		sideInt int
 		isDir   int
 		mtimeNS int64
 		mode    int64
+		digest  string
 		synced  int64
 	)
-	err := row.Scan(&e.Path, &sideInt, &isDir, &e.Size, &mtimeNS, &mode, &e.SHA256, &synced, &e.Status)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, nil
+	if err := sc.Scan(&e.Path, &sideInt, &isDir, &e.Size, &mtimeNS, &mode, &digest, &synced, &e.Status); err != nil {
+		return Entry{}, err
 	}
+
+	parsed, err := hash.ParseDigest(digest)
 	if err != nil {
-		return nil, fmt.Errorf("lendo entrada %s/%s: %w", side, path, err)
+		return Entry{}, fmt.Errorf("entrada %s: %w", e.Path, err)
 	}
 
 	e.Side = event.Side(sideInt)
 	e.IsDir = isDir != 0
 	e.MTime = time.Unix(0, mtimeNS)
 	e.Mode = os.FileMode(uint32(mode))
+	e.Digest = parsed
 	e.SyncedAt = time.Unix(0, synced)
+	return e, nil
+}
+
+// Get devolve a entrada de (path, side). Devolve (nil, nil) se não existir.
+func (d *DB) Get(ctx context.Context, side event.Side, path string) (*Entry, error) {
+	row := d.db.QueryRowContext(ctx,
+		`SELECT `+entryColumns+` FROM entries WHERE path = ? AND side = ?`, path, int(side))
+
+	e, err := scanEntry(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("lendo entrada %s/%s: %w", side, path, err)
+	}
 	return &e, nil
+}
+
+const upsertEntry = `
+	INSERT INTO entries (path, side, is_dir, size, mtime_ns, mode, digest, synced_at, status)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+	ON CONFLICT(path, side) DO UPDATE SET
+		is_dir = excluded.is_dir, size = excluded.size, mtime_ns = excluded.mtime_ns,
+		mode = excluded.mode, digest = excluded.digest,
+		synced_at = excluded.synced_at, status = excluded.status`
+
+// entryArgs monta os argumentos de upsertEntry, aplicando os defaults.
+func entryArgs(e Entry) []any {
+	var digest any
+	if !e.Digest.IsZero() {
+		digest = e.Digest.String()
+	}
+	if e.SyncedAt.IsZero() {
+		e.SyncedAt = time.Now()
+	}
+	if e.Status == "" {
+		e.Status = StatusSynced
+	}
+	return []any{
+		e.Path, int(e.Side), boolInt(e.IsDir), e.Size, e.MTime.UnixNano(),
+		int64(e.Mode), digest, e.SyncedAt.UnixNano(), e.Status,
+	}
 }
 
 // Put grava (ou substitui) uma entrada.
 func (d *DB) Put(ctx context.Context, e Entry) error {
-	var sha any
-	if e.SHA256 != "" {
-		sha = e.SHA256
-	}
-	syncedAt := e.SyncedAt
-	if syncedAt.IsZero() {
-		syncedAt = time.Now()
-	}
-	status := e.Status
-	if status == "" {
-		status = StatusSynced
-	}
-
-	_, err := d.db.ExecContext(ctx, `
-		INSERT INTO entries (path, side, is_dir, size, mtime_ns, mode, sha256, synced_at, status)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT(path, side) DO UPDATE SET
-			is_dir = excluded.is_dir, size = excluded.size, mtime_ns = excluded.mtime_ns,
-			mode = excluded.mode, sha256 = excluded.sha256,
-			synced_at = excluded.synced_at, status = excluded.status`,
-		e.Path, int(e.Side), boolInt(e.IsDir), e.Size, e.MTime.UnixNano(),
-		int64(e.Mode), sha, syncedAt.UnixNano(), status)
-	if err != nil {
+	if _, err := d.db.ExecContext(ctx, upsertEntry, entryArgs(e)...); err != nil {
 		return fmt.Errorf("gravando entrada %s/%s: %w", e.Side, e.Path, err)
 	}
 	return nil
@@ -147,30 +189,8 @@ func (d *DB) PutBoth(ctx context.Context, a, b Entry) error {
 	}
 	defer tx.Rollback()
 
-	// TODO(engine): reaproveitar a lógica de Put dentro da transação em vez
-	// de duplicar o SQL, quando a interface de escrita estabilizar.
 	for _, e := range []Entry{a, b} {
-		var sha any
-		if e.SHA256 != "" {
-			sha = e.SHA256
-		}
-		status := e.Status
-		if status == "" {
-			status = StatusSynced
-		}
-		syncedAt := e.SyncedAt
-		if syncedAt.IsZero() {
-			syncedAt = time.Now()
-		}
-		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO entries (path, side, is_dir, size, mtime_ns, mode, sha256, synced_at, status)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-			ON CONFLICT(path, side) DO UPDATE SET
-				is_dir = excluded.is_dir, size = excluded.size, mtime_ns = excluded.mtime_ns,
-				mode = excluded.mode, sha256 = excluded.sha256,
-				synced_at = excluded.synced_at, status = excluded.status`,
-			e.Path, int(e.Side), boolInt(e.IsDir), e.Size, e.MTime.UnixNano(),
-			int64(e.Mode), sha, syncedAt.UnixNano(), status); err != nil {
+		if _, err := tx.ExecContext(ctx, upsertEntry, entryArgs(e)...); err != nil {
 			return fmt.Errorf("gravando par %s: %w", e.Path, err)
 		}
 	}
@@ -199,8 +219,58 @@ func (d *DB) MarkStatus(ctx context.Context, side event.Side, path, status strin
 	return err
 }
 
+// Subtree devolve as entradas conhecidas de um lado sob rel (incluindo rel).
+func (d *DB) Subtree(ctx context.Context, side event.Side, rel string) (map[string]Entry, error) {
+	rows, err := d.db.QueryContext(ctx,
+		`SELECT `+entryColumns+` FROM entries
+		 WHERE side = ? AND (path = ? OR path LIKE ? ESCAPE '\')`,
+		int(side), rel, escapeLike(rel)+`/%`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	return collectEntries(rows)
+}
+
+// Paths devolve todos os paths conhecidos de um lado. Usado pelo Full Resync
+// para detectar o que existe no estado mas não no disco.
+func (d *DB) Paths(ctx context.Context, side event.Side) (map[string]Entry, error) {
+	rows, err := d.db.QueryContext(ctx,
+		`SELECT `+entryColumns+` FROM entries WHERE side = ?`, int(side))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	return collectEntries(rows)
+}
+
+func collectEntries(rows *sql.Rows) (map[string]Entry, error) {
+	out := make(map[string]Entry)
+	for rows.Next() {
+		e, err := scanEntry(rows)
+		if err != nil {
+			return nil, err
+		}
+		out[e.Path] = e
+	}
+	return out, rows.Err()
+}
+
+// IsEmpty informa se o banco não tem nenhuma entrada.
+//
+// A pergunta importa: com estado vazio não há como distinguir "arquivo novo
+// deste lado" de "arquivo apagado do outro lado", e a reconciliação precisa
+// avisar em vez de escolher em silêncio.
+func (d *DB) IsEmpty(ctx context.Context) (bool, error) {
+	var n int
+	err := d.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM entries)`).Scan(&n)
+	return n == 0, err
+}
+
 // RecordConflict registra um conflito não resolvido.
-func (d *DB) RecordConflict(ctx context.Context, path, shaA, shaB string) error {
+func (d *DB) RecordConflict(ctx context.Context, path string, a, b hash.Digest) error {
 	_, err := d.db.ExecContext(ctx, `
 		INSERT INTO conflicts (path, detected_at, sha_a, sha_b)
 		VALUES (?, ?, ?, ?)
@@ -208,7 +278,7 @@ func (d *DB) RecordConflict(ctx context.Context, path, shaA, shaB string) error 
 			detected_at = excluded.detected_at,
 			sha_a = excluded.sha_a, sha_b = excluded.sha_b,
 			resolution = NULL, resolved_at = NULL`,
-		path, time.Now().UnixNano(), shaA, shaB)
+		path, time.Now().UnixNano(), a.String(), b.String())
 	return err
 }
 
@@ -220,7 +290,121 @@ func (d *DB) ResolveConflict(ctx context.Context, path, resolution string) error
 	return err
 }
 
-// Meta lê um valor de configuração persistida (ex.: se o First Sync já rodou).
+// Conflict é um conflito registrado.
+type Conflict struct {
+	Path       string
+	DetectedAt time.Time
+	SHAA       string
+	SHAB       string
+	Resolution string
+}
+
+// UnresolvedConflicts lista os conflitos ainda sem resolução, mais recentes
+// primeiro. limit <= 0 devolve todos.
+func (d *DB) UnresolvedConflicts(ctx context.Context, limit int) ([]Conflict, error) {
+	query := `SELECT path, detected_at, COALESCE(sha_a, ''), COALESCE(sha_b, '')
+	          FROM conflicts WHERE resolution IS NULL ORDER BY detected_at DESC`
+	args := []any{}
+	if limit > 0 {
+		query += ` LIMIT ?`
+		args = append(args, limit)
+	}
+
+	rows, err := d.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []Conflict
+	for rows.Next() {
+		var (
+			c        Conflict
+			detected int64
+		)
+		if err := rows.Scan(&c.Path, &detected, &c.SHAA, &c.SHAB); err != nil {
+			return nil, err
+		}
+		c.DetectedAt = time.Unix(0, detected)
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+// Summary é o retrato do estado usado pelo -status.
+type Summary struct {
+	EntriesA     int
+	EntriesB     int
+	ByStatus     map[string]int
+	Conflicts    int
+	SchemaVer    int
+	FirstSync    string
+	LastResync   string
+	Heartbeat    string
+	Watches      string
+	RetryQueue   string
+	PID          string
+	StateIsEmpty bool
+}
+
+// Summarize coleta os números para o relatório de status.
+func (d *DB) Summarize(ctx context.Context) (Summary, error) {
+	s := Summary{ByStatus: make(map[string]int)}
+
+	rows, err := d.db.QueryContext(ctx,
+		`SELECT side, status, COUNT(*) FROM entries GROUP BY side, status`)
+	if err != nil {
+		return s, err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var (
+			side   int
+			status string
+			n      int
+		)
+		if err := rows.Scan(&side, &status, &n); err != nil {
+			return s, err
+		}
+		if event.Side(side) == event.SideA {
+			s.EntriesA += n
+		} else {
+			s.EntriesB += n
+		}
+		s.ByStatus[status] += n
+	}
+	if err := rows.Err(); err != nil {
+		return s, err
+	}
+	s.StateIsEmpty = s.EntriesA == 0 && s.EntriesB == 0
+
+	if err := d.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM conflicts WHERE resolution IS NULL`).Scan(&s.Conflicts); err != nil {
+		return s, err
+	}
+	if err := d.db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&s.SchemaVer); err != nil {
+		return s, err
+	}
+
+	for key, dst := range map[string]*string{
+		MetaFirstSync:  &s.FirstSync,
+		MetaLastResync: &s.LastResync,
+		MetaHeartbeat:  &s.Heartbeat,
+		MetaWatches:    &s.Watches,
+		MetaRetryQueue: &s.RetryQueue,
+		MetaPID:        &s.PID,
+	} {
+		v, err := d.Meta(ctx, key)
+		if err != nil {
+			return s, err
+		}
+		*dst = v
+	}
+	return s, nil
+}
+
+// Meta lê um valor de configuração persistida.
 func (d *DB) Meta(ctx context.Context, key string) (string, error) {
 	var v string
 	err := d.db.QueryRowContext(ctx, `SELECT value FROM meta WHERE key = ?`, key).Scan(&v)
@@ -238,37 +422,22 @@ func (d *DB) SetMeta(ctx context.Context, key, value string) error {
 	return err
 }
 
-// Paths devolve todos os paths conhecidos de um lado. Usado pelo Full Resync
-// para detectar o que existe no estado mas não no disco.
-func (d *DB) Paths(ctx context.Context, side event.Side) (map[string]Entry, error) {
-	rows, err := d.db.QueryContext(ctx, `
-		SELECT path, is_dir, size, mtime_ns, mode, COALESCE(sha256, ''), synced_at, status
-		FROM entries WHERE side = ?`, int(side))
+// SetMetaMany grava vários valores em uma transação.
+func (d *DB) SetMetaMany(ctx context.Context, kv map[string]string) error {
+	tx, err := d.db.BeginTx(ctx, nil)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	defer rows.Close()
+	defer tx.Rollback()
 
-	out := make(map[string]Entry)
-	for rows.Next() {
-		var (
-			e       Entry
-			isDir   int
-			mtimeNS int64
-			mode    int64
-			synced  int64
-		)
-		if err := rows.Scan(&e.Path, &isDir, &e.Size, &mtimeNS, &mode, &e.SHA256, &synced, &e.Status); err != nil {
-			return nil, err
+	for k, v := range kv {
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO meta (key, value) VALUES (?, ?)
+			ON CONFLICT(key) DO UPDATE SET value = excluded.value`, k, v); err != nil {
+			return err
 		}
-		e.Side = side
-		e.IsDir = isDir != 0
-		e.MTime = time.Unix(0, mtimeNS)
-		e.Mode = os.FileMode(uint32(mode))
-		e.SyncedAt = time.Unix(0, synced)
-		out[e.Path] = e
 	}
-	return out, rows.Err()
+	return tx.Commit()
 }
 
 func boolInt(b bool) int {

@@ -36,6 +36,7 @@ const DefaultMask uint32 = unix.IN_CREATE |
 	unix.IN_MOVED_TO |
 	unix.IN_MOVE_SELF |
 	unix.IN_ATTRIB |
+	unix.IN_UNMOUNT |
 	unix.IN_EXCL_UNLINK
 
 // ErrClosed é devolvido por Read após Close.
