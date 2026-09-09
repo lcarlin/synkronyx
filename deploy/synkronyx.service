@@ -1,0 +1,50 @@
+[Unit]
+Description=Synkronyx — sincronização bidirecional contínua de diretórios
+Documentation=https://github.com/lcarlin/synkronyx
+After=local-fs.target
+Wants=local-fs.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/synkronyx -config /etc/synkronyx/synkronyx.yaml
+Restart=always
+RestartSec=5s
+
+# Usuário dedicado, criado por synkronyx.sysusers (ver deploy/).
+User=synkronyx
+Group=synkronyx
+
+# O daemon precisa ler e escrever nas duas raízes; ajuste ReadWritePaths para
+# os diretórios reais antes de habilitar o serviço.
+StateDirectory=synkronyx
+StateDirectoryMode=0750
+ReadWritePaths=/dados/A /dados/B
+
+# Superfície mínima (seção 12 do escopo).
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallFilter=@system-service
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+# Logs vão para o journald via stderr.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=synkronyx
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,56 @@
+# Synkronyx — configuração de exemplo
+#
+# Instalar em /etc/synkronyx/synkronyx.yaml
+
+# As duas raízes da árvore lógica. Obrigatórias, absolutas, e não podem estar
+# aninhadas uma na outra (aninhamento produz recursão infinita de eventos).
+a: /dados/A
+b: /dados/B
+
+# Banco de estado. Precisa ser gravável pelo usuário do serviço.
+state_path: /var/lib/synkronyx/state.db
+
+# Janela de silêncio por path antes de propagar. Aumentar em cima de
+# workloads que escrevem em rajada (builds, extração de arquivos); diminuir
+# se a latência de propagação importar mais que o número de transferências.
+debounce: 750ms
+
+# Por quanto tempo uma escrita do próprio sincronizador continua sendo
+# reconhecida como tal. Aumentar se houver arquivos muito grandes: a escrita
+# precisa caber na janela. Não é o único mecanismo anti-loop (ver
+# internal/guard), então errar para mais é barato.
+self_write_ttl: 30s
+
+# Padrões ignorados nos dois lados. Sem "/" casam contra qualquer componente
+# do path; com "/" casam contra o path relativo inteiro.
+exclude:
+  - .synkronyx
+  - "*.sync-conflict-*"
+  - "*.swp"
+  - "~$*"
+  - .git/objects
+
+# preserve    — renomeia a versão do destino e mantém as duas (padrão, fail safe)
+# newer-wins  — o mtime mais recente vence
+# manual      — não toca em nada; marca o par como em conflito
+conflict_policy: preserve
+
+# Como resolver divergências pré-existentes no primeiro scan.
+# union   — o que existe só de um lado é copiado para o outro
+# a-wins  — A é autoritativo
+# b-wins  — B é autoritativo
+first_sync_policy: union
+
+rsync_path: rsync
+rsync_args:
+  - --archive
+  - --partial
+  - --inplace
+  - --numeric-ids
+
+# debug | info | warn | error
+log_level: info
+
+# Arquivos acima deste tamanho não são hasheados; a comparação cai para
+# tamanho e mtime. 0 = sem limite.
+hash_max_bytes: 0

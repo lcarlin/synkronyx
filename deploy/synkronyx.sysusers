@@ -1,0 +1,2 @@
+# Usuário de serviço dedicado. Instalar em /usr/lib/sysusers.d/synkronyx.conf
+u synkronyx - "Synkronyx sync daemon" /var/lib/synkronyx /usr/sbin/nologin
