@@ -141,7 +141,7 @@ const (
 func Default() Config {
 	return Config{
 		StatePath:       "/var/lib/synkronyx/state.db",
-		Debounce:        750 * time.Millisecond,
+		Debounce:        time.Second,
 		SelfWriteTTL:    30 * time.Second,
 		ConflictPolicy:  ConflictPreserve,
 		FirstSyncPolicy: FirstSyncUnion,

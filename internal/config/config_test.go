@@ -226,3 +226,9 @@ func TestDefaultRetryAttempts(t *testing.T) {
 		t.Errorf("RetryMaxAttempts padrão = %d, quero 8", got)
 	}
 }
+
+func TestDefaultDebounce(t *testing.T) {
+	if got := Default().Debounce; got != time.Second {
+		t.Errorf("Debounce padrão = %s, quero 1s", got)
+	}
+}

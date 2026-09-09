@@ -13,7 +13,7 @@ state_path: /var/lib/synkronyx/state.db
 # Janela de silêncio por path antes de propagar. Aumentar em cima de
 # workloads que escrevem em rajada (builds, extração de arquivos); diminuir
 # se a latência de propagação importar mais que o número de transferências.
-debounce: 750ms
+debounce: 1s
 
 # Por quanto tempo uma escrita do próprio sincronizador continua sendo
 # reconhecida como tal. Aumentar se houver arquivos muito grandes: a escrita
