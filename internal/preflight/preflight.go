@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Luiz Antonio Carlin
+
 // Package preflight faz as verificações de ambiente que só têm resposta em
 // tempo de execução.
 //

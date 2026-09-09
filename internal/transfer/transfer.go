@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Luiz Antonio Carlin
+
 // Package transfer executa as operações de escrita no lado destino.
 //
 // A cópia de conteúdo é delegada ao rsync (seção 5 do escopo): ele evita

@@ -1,0 +1,73 @@
+# Variante privilegiada do Synkronyx, para quem precisa que dono e grupo sejam
+# reconciliados.
+#
+# O unit padrão (synkronyx.service) roda como usuário dedicado e sem
+# capabilities, seguindo o princípio de superfície mínima da seção 12 do
+# escopo. Isso tem uma consequência que vale explicitar: sem privilégio o
+# chown falha sempre, e por isso o engine NÃO compara dono nem grupo —
+# comparar sem poder aplicar produziria divergência detectada e nunca
+# resolvida, refeita em toda reconciliação.
+#
+# Este arquivo troca esse trade-off de forma consciente e mínima: roda como
+# root, mas mantém apenas as duas capabilities que a operação exige.
+#
+# Use um OU o outro, nunca os dois ao mesmo tempo sobre as mesmas raízes.
+#
+#   systemctl disable --now synkronyx
+#   systemctl enable  --now synkronyx-root
+
+[Unit]
+Description=Synkronyx — sincronização bidirecional contínua (com propriedade)
+Documentation=https://github.com/lcarlin/synkronyx
+After=local-fs.target
+Wants=local-fs.target
+Conflicts=synkronyx.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/synkronyx -config /etc/synkronyx/synkronyx.yaml
+Restart=always
+RestartSec=5s
+
+# Root é requisito, não preferência: só ele pode mudar o dono de um arquivo
+# que não lhe pertence.
+User=root
+Group=root
+
+StateDirectory=synkronyx
+StateDirectoryMode=0750
+# Ajuste para as raízes reais antes de habilitar.
+ReadWritePaths=/dados/A /dados/B
+
+# CAP_CHOWN muda dono e grupo; CAP_FOWNER permite alterar atributos de
+# arquivos de outros donos. Nada além disso é necessário — em particular, o
+# CapabilityBoundingSet vazio do unit padrão é substituído por uma lista
+# explícita, não removido.
+CapabilityBoundingSet=CAP_CHOWN CAP_FOWNER CAP_DAC_OVERRIDE
+AmbientCapabilities=CAP_CHOWN CAP_FOWNER CAP_DAC_OVERRIDE
+
+# O restante do endurecimento continua valendo.
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallFilter=@system-service @chown
+SystemCallArchitectures=native
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=synkronyx
+
+[Install]
+WantedBy=multi-user.target

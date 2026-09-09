@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Luiz Antonio Carlin
+
 // Package event define o vocabulário de eventos que circula entre os
 // watchers e o Sync Engine. É a fronteira entre "o que o filesystem
 // disse" (inotify, cru) e "o que o sincronizador entende" (domínio).

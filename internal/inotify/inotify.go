@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Luiz Antonio Carlin
+
 // Package inotify é um wrapper fino sobre a API inotify(7) do Linux.
 //
 // Existe em vez de uma biblioteca pronta por um motivo específico: o campo

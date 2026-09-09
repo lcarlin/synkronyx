@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Luiz Antonio Carlin
+
 // Package scan percorre uma árvore inteira, produzindo o inventário usado
 // pelo First Sync (seção 10) e pelo Full Resync (seção 11).
 package scan

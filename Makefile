@@ -30,6 +30,7 @@ clean:
 install: build
 	install -Dm0755 bin/$(BINARY) $(DESTDIR)$(PREFIX)/bin/$(BINARY)
 	install -Dm0644 deploy/synkronyx.service $(DESTDIR)/etc/systemd/system/synkronyx.service
+	install -Dm0644 deploy/synkronyx-root.service $(DESTDIR)/etc/systemd/system/synkronyx-root.service
 	install -Dm0644 deploy/synkronyx.sysusers $(DESTDIR)/usr/lib/sysusers.d/synkronyx.conf
 	install -Dm0644 deploy/99-synkronyx-inotify.conf $(DESTDIR)/etc/sysctl.d/99-synkronyx-inotify.conf
 	install -Dm0640 configs/synkronyx.example.yaml $(DESTDIR)/etc/synkronyx/synkronyx.example.yaml
@@ -44,6 +45,7 @@ install: build
 uninstall:
 	rm -f $(DESTDIR)$(PREFIX)/bin/$(BINARY)
 	rm -f $(DESTDIR)/etc/systemd/system/synkronyx.service
+	rm -f $(DESTDIR)/etc/systemd/system/synkronyx-root.service
 	rm -f $(DESTDIR)/usr/lib/sysusers.d/synkronyx.conf
 	rm -f $(DESTDIR)/etc/sysctl.d/99-synkronyx-inotify.conf
 

@@ -46,6 +46,14 @@ sudo systemctl enable --now synkronyx
 journalctl -u synkronyx -f
 ```
 
+Dois units são instalados. O padrão (`synkronyx.service`) roda como usuário
+dedicado e sem capabilities; nele o engine **não** compara dono nem grupo,
+porque sem privilégio o `chown` falharia sempre e a divergência seria detectada
+e nunca resolvida. Se a propriedade dos arquivos precisa ser sincronizada, use
+`synkronyx-root.service`, que roda como root com apenas `CAP_CHOWN`,
+`CAP_FOWNER` e `CAP_DAC_OVERRIDE` — nunca os dois ao mesmo tempo sobre as
+mesmas raízes.
+
 `SIGHUP` dispara um Full Resync sem reiniciar o processo:
 
 ```bash
@@ -206,8 +214,9 @@ lado cego enquanto o outro continua propagando.
 
 ## Licença
 
-GPL-3.0 — ver [LICENSE](LICENSE). Versões modificadas distribuídas a terceiros
-precisam ter o código-fonte disponibilizado sob a mesma licença.
+GPL-3.0-or-later — ver [LICENSE](LICENSE). Versões modificadas distribuídas a
+terceiros precisam ter o código-fonte disponibilizado sob a mesma licença. Cada
+arquivo `.go` carrega o identificador SPDX correspondente.
 
 ## Layout
 

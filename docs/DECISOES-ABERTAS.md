@@ -199,6 +199,12 @@ root, e confundir os dois faria a reconciliação ver diferença onde não há.
 `Lchown`, nunca `Chown`: em um symlink, `Chown` mudaria o dono do alvo, que é
 outro arquivo e pode estar fora da árvore.
 
+O unit padrão não pode usar isso, e a contradição é deliberada: ele roda como
+`User=synkronyx` com `CapabilityBoundingSet=` vazio, seguindo a superfície
+mínima da seção 12. Quem precisa de propriedade sincronizada usa
+`deploy/synkronyx-root.service`, que troca o trade-off de forma explícita e
+mínima — root, mas só com `CAP_CHOWN`, `CAP_FOWNER` e `CAP_DAC_OVERRIDE`.
+
 **Limitação de verificação:** o branch privilegiado não foi exercitado como
 root — a máquina de desenvolvimento não permite `sudo` sem senha nem user
 namespaces. O que os testes cobrem é a lógica de decisão (com

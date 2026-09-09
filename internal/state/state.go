@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Luiz Antonio Carlin
+
 // Package state guarda em SQLite o que já foi sincronizado.
 //
 // O driver é o modernc.org/sqlite, em Go puro: mantém o binário único e

@@ -21,6 +21,10 @@ StateDirectoryMode=0750
 ReadWritePaths=/dados/A /dados/B
 
 # Superfície mínima (seção 12 do escopo).
+#
+# Consequência a ter em mente: sem privilégio o chown falha sempre, e por isso
+# o engine não compara dono nem grupo. Se a propriedade dos arquivos precisa
+# ser sincronizada, use deploy/synkronyx-root.service em vez deste.
 NoNewPrivileges=yes
 PrivateTmp=yes
 PrivateDevices=yes

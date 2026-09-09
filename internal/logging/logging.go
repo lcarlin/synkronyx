@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Luiz Antonio Carlin
+
 // Package logging configura o logger estruturado do daemon.
 //
 // Sob systemd o stderr do processo vai para o journald, então basta escrever

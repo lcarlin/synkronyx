@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Luiz Antonio Carlin
+
 // Package hash identifica conteúdo de arquivos (seção 8 do escopo).
 //
 // SHA-256 é a identidade definitiva, mas calculá-lo a cada evento é caro. A

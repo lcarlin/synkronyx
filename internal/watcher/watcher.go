@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Luiz Antonio Carlin
+
 // Package watcher observa recursivamente uma raiz e traduz eventos crus do
 // inotify em eventos de domínio.
 //

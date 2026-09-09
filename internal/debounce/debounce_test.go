@@ -1,7 +1,12 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Luiz Antonio Carlin
+
 package debounce
 
 import (
 	"context"
+	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -106,5 +111,82 @@ func drain(t *testing.T, d *Debouncer, timeout time.Duration) []event.Event {
 		case <-deadline:
 			return got
 		}
+	}
+}
+
+// TestCloseDuringEmitIsSafe é regressão de uma corrida real, encontrada pelo
+// detector durante uma execução da suíte: Close fechava o canal de saída
+// enquanto um timer que já havia disparado estava a caminho do envio.
+//
+// Não era só flake de teste. Em produção o desfecho é um panic de "send on
+// closed channel" no desligamento do serviço — raro, dependente de tempo, e
+// exatamente o tipo de falha que só aparece sob carga.
+//
+// timer.Stop() não resolvia: um timer que já disparou devolve false, e nesse
+// ponto o callback já passou da verificação e está indo enviar.
+func TestCloseDuringEmitIsSafe(t *testing.T) {
+	// A janela é curta de propósito, para que os timers disparem justamente
+	// enquanto Close acontece.
+	for range 50 {
+		d := New(time.Millisecond)
+		ctx := context.Background()
+
+		var wg sync.WaitGroup
+		for i := range 40 {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				d.Push(ctx, event.Event{
+					Side: event.SideA, Kind: event.KindModify,
+					Path: "f" + strconv.Itoa(i) + ".txt",
+				})
+			}()
+		}
+
+		// Fecha no meio da tempestade, sem drenar o canal.
+		go d.Close()
+
+		wg.Wait()
+		d.Close() // idempotente
+	}
+}
+
+// Push depois de Close não pode entregar nada nem entrar em pânico.
+func TestPushAfterCloseIsIgnored(t *testing.T) {
+	d := New(10 * time.Millisecond)
+	d.Close()
+
+	d.Push(context.Background(), event.Event{Side: event.SideA, Path: "f.txt"})
+
+	// O canal está fechado: uma leitura devolve imediatamente com ok falso.
+	select {
+	case _, ok := <-d.Out():
+		if ok {
+			t.Error("um evento foi entregue depois de Close")
+		}
+	case <-time.After(time.Second):
+		t.Error("leitura em canal fechado deveria retornar de imediato")
+	}
+}
+
+// Close precisa retornar mesmo com o canal de saída cheio e ninguém lendo —
+// senão o desligamento do serviço travaria.
+func TestCloseReturnsWithFullChannelAndNoReader(t *testing.T) {
+	d := New(time.Millisecond)
+	ctx := context.Background()
+
+	// Mais eventos do que a capacidade do canal, e nenhum leitor.
+	for i := range 2000 {
+		d.Push(ctx, event.Event{Side: event.SideA, Path: "f" + strconv.Itoa(i) + ".txt"})
+	}
+	time.Sleep(50 * time.Millisecond) // deixa os timers dispararem
+
+	done := make(chan struct{})
+	go func() { d.Close(); close(done) }()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close travou: emissões bloqueadas não foram liberadas")
 	}
 }

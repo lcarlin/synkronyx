@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Luiz Antonio Carlin
+
 // Package guard implementa a prevenção de loops de sincronização.
 //
 // É o requisito da seção 6 do escopo, e é tratado aqui como mecanismo

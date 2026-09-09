@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Luiz Antonio Carlin
+
 // Package engine é o Sync Engine: o componente central descrito na seção 3 do
 // escopo. Recebe eventos já agrupados, decide a operação correspondente no
 // lado oposto, executa e atualiza o estado.
