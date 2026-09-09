@@ -238,6 +238,16 @@ observada for removida, movida ou desmontada, o watcher reporta falha terminal
 e o serviço encerra para o systemd reiniciá-lo — seguir rodando deixaria um
 lado cego enquanto o outro continua propagando.
 
+## Versões
+
+Tags são cortadas deliberadamente, não movidas. `v0.1.0` marca o commit em que
+foi criada e fica lá; commits posteriores se acumulam até a próxima versão ser
+cortada. Um release ficar "atrás" do `main` é o funcionamento esperado, não
+algo a corrigir.
+
+`-version` reporta a tag quando o build sai de um commit marcado, e a descrição
+do `git describe` caso contrário.
+
 ## Licença
 
 GPL-3.0-or-later — ver [LICENSE](LICENSE). Versões modificadas distribuídas a
