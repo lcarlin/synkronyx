@@ -154,7 +154,7 @@ func Default() Config {
 		PreserveHardlinks: false,
 		DirDeletePolicy:   DirDeletePreserveUnknown,
 
-		RetryMaxAttempts:  5,
+		RetryMaxAttempts:  8,
 		RetryInitialDelay: 2 * time.Second,
 		RetryMaxDelay:     5 * time.Minute,
 

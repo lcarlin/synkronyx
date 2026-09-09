@@ -78,7 +78,11 @@ dir_delete_policy: preserve-unknown
 # Reenvio de operações que falharam, com backoff exponencial. Esgotadas as
 # tentativas, o path é marcado com erro e um full resync é solicitado.
 # 0 tentativas desliga o retry e faz cada falha depender do próximo resync.
-retry_max_attempts: 5
+#
+# Com estes valores as esperas são 2s, 4s, 8s, 16s, 32s, 1m4s e 2m8s — uma
+# janela de 4m14s antes de desistir. retry_max_delay só entra em cena se
+# retry_max_attempts subir mais.
+retry_max_attempts: 8
 retry_initial_delay: 2s
 retry_max_delay: 5m
 

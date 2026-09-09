@@ -220,3 +220,9 @@ func TestValidateRejectsZeroWorkers(t *testing.T) {
 		t.Fatal("Validate() aceitou sync_workers = 0")
 	}
 }
+
+func TestDefaultRetryAttempts(t *testing.T) {
+	if got := Default().RetryMaxAttempts; got != 8 {
+		t.Errorf("RetryMaxAttempts padrão = %d, quero 8", got)
+	}
+}
