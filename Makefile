@@ -5,7 +5,7 @@ PREFIX  ?= /usr/local
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -s -w -X main.version=$(VERSION)
 
-.PHONY: all build test vet fmt lint clean install uninstall run check
+.PHONY: all build test vet fmt lint ci hooks clean install uninstall run check
 
 all: build
 
@@ -22,6 +22,38 @@ fmt:
 	gofmt -l -w .
 
 lint: fmt vet test
+
+# Verificação completa, sem alterar arquivo nenhum. É o que rodaria num CI, e
+# roda aqui: a suíte precisa de Linux de verdade — os testes de watcher falam
+# com o inotify do kernel e os de engine invocam o rsync —, então não haveria
+# ganho em terceirizar isto para uma máquina remota.
+#
+# Diferença em relação a `lint`: `fmt` reescreve arquivos, e uma verificação
+# que conserta o que está errado não verifica nada. Aqui a formatação errada
+# falha.
+ci:
+	@printf '== dependências externas ==\n'
+	@rsync --version | head -1
+	@printf 'inotify max_user_watches: %s\n' "$$(cat /proc/sys/fs/inotify/max_user_watches)"
+	@printf 'go: %s\n' "$$(go version)"
+	@printf '\n== formatação ==\n'
+	@arquivos=$$(gofmt -l .); \
+	if [ -n "$$arquivos" ]; then echo "não formatados:"; echo "$$arquivos"; exit 1; fi
+	@echo "ok"
+	@printf '\n== vet ==\n'
+	go vet ./...
+	@printf '\n== testes com detector de corrida ==\n'
+	go test -race -count=1 ./...
+	@printf '\n== build estático ==\n'
+	CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)" -o bin/$(BINARY) ./cmd/synkronyx
+	@./bin/$(BINARY) -version
+
+# Liga o hook de pre-push, que roda `make ci` antes de cada push.
+hooks:
+	git config core.hooksPath .githooks
+	@echo "core.hooksPath = .githooks"
+	@echo "pre-push roda 'make ci'; pule com 'git push --no-verify' quando precisar"
+
 
 clean:
 	rm -rf bin

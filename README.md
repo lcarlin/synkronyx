@@ -1,7 +1,5 @@
 # Synkronyx
 
-[![CI](https://github.com/lcarlin/synkronyx/actions/workflows/ci.yml/badge.svg)](https://github.com/lcarlin/synkronyx/actions/workflows/ci.yml)
-
 Serviço Linux de sincronização bidirecional contínua entre duas árvores de
 diretórios. Uma alteração em `A` chega a `B`, uma alteração em `B` chega a
 `A`, e o sistema não entra em loop no meio do caminho.
@@ -25,9 +23,33 @@ aberto estão em [docs/DECISOES-ABERTAS.md](docs/DECISOES-ABERTAS.md).
 make build          # binário estático em bin/synkronyx (CGO desabilitado)
 make test           # inclui testes de integração; exigem rsync no PATH
 make lint           # fmt + vet + test
+make ci             # verificação completa, sem alterar arquivo nenhum
 ```
 
 O binário é único e sem dependências de runtime além do `rsync`.
+
+### Verificação local, não remota
+
+Não há CI hospedado, e a escolha é deliberada. A suíte precisa de Linux de
+verdade: os testes de watcher falam com o inotify do kernel e os de engine
+invocam o rsync. Mockar isso seria testar as suposições do código em vez do
+comportamento — então a verificação roda onde o kernel está, e terceirizá-la
+para uma máquina remota não traria ganho nenhum.
+
+`make ci` é a verificação completa: confere as dependências externas, recusa
+código não formatado, roda `go vet`, executa a suíte com o detector de corrida
+e produz o binário estático. Ao contrário de `make lint`, não reescreve
+arquivo nenhum — uma verificação que conserta o que está errado não verifica
+nada.
+
+Para rodar automaticamente antes de cada push:
+
+```bash
+make hooks          # aponta core.hooksPath para .githooks
+```
+
+O hook leva o tempo da suíte com `-race` (algo em torno de 30 s). `git push
+--no-verify` pula quando for realmente necessário.
 
 ## Uso
 

@@ -1,0 +1,15 @@
+#!/bin/sh
+# Verificação local antes de cada push — o lugar do CI neste projeto.
+#
+# Instalar com `make hooks`, que aponta core.hooksPath para este diretório.
+# Pular uma vez, quando for realmente necessário: `git push --no-verify`.
+
+set -e
+
+raiz=$(git rev-parse --show-toplevel)
+cd "$raiz"
+
+printf '\n== verificação local ==\n'
+make ci
+
+printf '\n== ok, seguindo com o push ==\n'
