@@ -170,7 +170,7 @@ func Default() Config {
 		DirDeletePolicy:   DirDeletePreserveUnknown,
 
 		RetryMaxAttempts:  8,
-		RetryInitialDelay: 2 * time.Second,
+		RetryInitialDelay: 5 * time.Second,
 		RetryMaxDelay:     5 * time.Minute,
 
 		HeartbeatInterval: 15 * time.Second,

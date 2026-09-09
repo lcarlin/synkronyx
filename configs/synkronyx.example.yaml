@@ -94,11 +94,11 @@ dir_delete_policy: preserve-unknown
 # tentativas, o path é marcado com erro e um full resync é solicitado.
 # 0 tentativas desliga o retry e faz cada falha depender do próximo resync.
 #
-# Com estes valores as esperas são 2s, 4s, 8s, 16s, 32s, 1m4s e 2m8s — uma
-# janela de 4m14s antes de desistir. retry_max_delay só entra em cena se
-# retry_max_attempts subir mais.
+# Com estes valores as esperas são 5s, 10s, 20s, 40s, 1m20s, 2m40s e 5m — uma
+# janela de 10m15s antes de desistir. A última é o retry_max_delay entrando em
+# ação: sem o teto seria 5m20s.
 retry_max_attempts: 8
-retry_initial_delay: 2s
+retry_initial_delay: 5s
 retry_max_delay: 5m
 
 # Periodicidade com que o daemon publica seu estado no banco, para o

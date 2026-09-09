@@ -267,3 +267,9 @@ func TestDefaultHashSampleBytes(t *testing.T) {
 		t.Errorf("HashSampleBytes padrão = %d, quero %d (4 MiB)", got, 4<<20)
 	}
 }
+
+func TestDefaultRetryInitialDelay(t *testing.T) {
+	if got := Default().RetryInitialDelay; got != 5*time.Second {
+		t.Errorf("RetryInitialDelay padrão = %s, quero 5s", got)
+	}
+}

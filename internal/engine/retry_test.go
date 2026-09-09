@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/lcarlin/synkronyx/internal/config"
 	"github.com/lcarlin/synkronyx/internal/event"
 )
 
@@ -93,5 +94,34 @@ func TestRetryNewerEventReplacesQueued(t *testing.T) {
 	due := q.due(now.Add(time.Hour))
 	if len(due) != 1 || due[0].ev.Kind != event.KindDelete {
 		t.Errorf("evento na fila = %v, quero o DELETE mais recente", due)
+	}
+}
+
+// A sequência de esperas dos padrões é o que o exemplo de configuração
+// documenta; se ela mudar sem o comentário mudar junto, o exemplo passa a
+// mentir.
+func TestDefaultBackoffSequence(t *testing.T) {
+	cfg := config.Default()
+	q := newRetryQueue(cfg.RetryMaxAttempts, cfg.RetryInitialDelay, cfg.RetryMaxDelay)
+
+	want := []time.Duration{
+		5 * time.Second, 10 * time.Second, 20 * time.Second, 40 * time.Second,
+		80 * time.Second, 160 * time.Second, 5 * time.Minute,
+	}
+
+	var total time.Duration
+	for i, w := range want {
+		got := q.backoff(i + 1)
+		if got != w {
+			t.Errorf("backoff(%d) = %s, quero %s", i+1, got, w)
+		}
+		total += got
+	}
+	if total != 10*time.Minute+15*time.Second {
+		t.Errorf("janela total = %s, quero 10m15s", total)
+	}
+	// A última espera é cortada pelo teto; sem ele seria 5m20s.
+	if q.backoff(len(want)) != cfg.RetryMaxDelay {
+		t.Error("a última tentativa deveria estar limitada por retry_max_delay")
 	}
 }
