@@ -157,10 +157,42 @@ func (t *Transfer) Remove(path string, isDir bool) error {
 	return nil
 }
 
-// SyncAttrs propaga apenas modo e timestamps, sem tocar no conteúdo.
-func (t *Transfer) SyncAttrs(ctx context.Context, src, dst string) error {
-	args := []string{"--archive", "--no-recursive", "--existing", "--times", "--perms", src, dst}
-	return t.run(ctx, args)
+// SyncAttrs propaga modo e timestamps de src para dst, sem tocar no conteúdo.
+//
+// Usa chmod e utimes diretos em vez do rsync, e por dois motivos. Um
+// diretório passado ao rsync sem barra final é tratado como algo a ser criado
+// *dentro* do destino, o que exigiria manipular o path só para dizer "ajuste
+// os atributos deste diretório". E chamar um processo externo para duas
+// syscalls é desproporcional.
+//
+// Não cria o que não existe, e não segue symlinks: chmod em um symlink
+// mudaria o modo do alvo, que é outro arquivo, possivelmente fora da árvore.
+func (t *Transfer) SyncAttrs(_ context.Context, src, dst string) error {
+	srcInfo, err := os.Lstat(src)
+	if err != nil {
+		return err
+	}
+	dstInfo, err := os.Lstat(dst)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	if srcInfo.Mode()&os.ModeSymlink != 0 || dstInfo.Mode()&os.ModeSymlink != 0 {
+		return nil
+	}
+
+	if srcInfo.Mode().Perm() != dstInfo.Mode().Perm() {
+		if err := os.Chmod(dst, srcInfo.Mode().Perm()); err != nil {
+			return fmt.Errorf("ajustando modo de %s: %w", dst, err)
+		}
+	}
+	mtime := srcInfo.ModTime()
+	if err := os.Chtimes(dst, mtime, mtime); err != nil {
+		return fmt.Errorf("ajustando timestamps de %s: %w", dst, err)
+	}
+	return nil
 }
 
 func (t *Transfer) run(ctx context.Context, args []string) error {

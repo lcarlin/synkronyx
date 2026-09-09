@@ -501,7 +501,13 @@ func (e *Engine) deleteOneSided(ctx context.Context, rel string, present event.S
 func (e *Engine) reconcileBothSides(ctx context.Context, rel string, stA, stB hash.Stat,
 	cmp comparison) (reconcileResult, error) {
 	if stA.IsDir && stB.IsDir {
-		return reconcileNoop, nil // diretórios existem dos dois lados; nada a fazer
+		// Existir dos dois lados não significa estar igual: modo e mtime de
+		// um diretório também são sincronizados. Retornar aqui sem comparar,
+		// como se fazia, deixava um chmod em diretório invisível para sempre.
+		if attrsDiverged(stA, stB) {
+			return e.reconcileAttrs(ctx, rel, stA, stB)
+		}
+		return reconcileNoop, nil
 	}
 	if stA.IsDir != stB.IsDir {
 		// Um é diretório e o outro é arquivo. É conflito por definição, e
@@ -537,7 +543,7 @@ func (e *Engine) reconcileBothSides(ctx context.Context, rel string, stA, stB ha
 		// são sincronizados (seção 2 do escopo), e uma alteração de atributos
 		// feita com o serviço parado não gerou evento nenhum. Só a
 		// reconciliação pode notá-la.
-		if stA.Mode.Perm() != stB.Mode.Perm() {
+		if attrsDiverged(stA, stB) {
 			return e.reconcileAttrs(ctx, rel, stA, stB)
 		}
 		// Nada a fazer além de registrar o estado.
@@ -685,8 +691,8 @@ func (e *Engine) reconcileAttrs(ctx context.Context, rel string, stA, stB hash.S
 	origin := event.SideA
 	switch {
 	case entryA != nil && entryB != nil:
-		changedA := stA.Mode.Perm() != entryA.Mode.Perm()
-		changedB := stB.Mode.Perm() != entryB.Mode.Perm()
+		changedA := attrsDiverged(stA, entryA.Stat())
+		changedB := attrsDiverged(stB, entryB.Stat())
 		switch {
 		case changedA && !changedB:
 			origin = event.SideA
@@ -699,9 +705,10 @@ func (e *Engine) reconcileAttrs(ctx context.Context, rel string, stA, stB hash.S
 		origin = newerSide(stA, stB)
 	}
 
-	e.log.Info("propagando permissões divergentes", "path", rel,
+	e.log.Info("propagando atributos divergentes", "path", rel,
 		"origem", origin.String(),
-		"modo_a", stA.Mode.Perm().String(), "modo_b", stB.Mode.Perm().String())
+		"modo_a", stA.Mode.Perm().String(), "modo_b", stB.Mode.Perm().String(),
+		"mtime_a", stA.MTime.Format(time.RFC3339), "mtime_b", stB.MTime.Format(time.RFC3339))
 
 	ev := event.Event{Side: origin, Kind: event.KindAttrib, Path: rel, At: time.Now()}
 	if err := e.propagateAttrs(ctx, ev,
@@ -716,4 +723,26 @@ func newerSide(stA, stB hash.Stat) event.Side {
 		return event.SideB
 	}
 	return event.SideA
+}
+
+// attrsDiverged informa se modo ou mtime diferem entre dois stats.
+//
+// Propagar divergência de mtime não é preciosismo. Um par sincronizado tem
+// mtimes idênticos, porque o rsync preserva o da origem, e sampledButStale
+// conta com isso: mtimes divergentes sob digest amostrado são lidos como
+// alteração invisível à amostra. Deixar o mtime divergir por conta de um
+// `touch` faria cada resync retransferir o arquivo grande inteiro, para
+// sempre, sem nunca convergir.
+//
+// A tolerância de um segundo vem de Stat.Unchanged, e existe porque nem todo
+// filesystem guarda sub-segundo.
+func attrsDiverged(a, b hash.Stat) bool {
+	if a.Mode.Perm() != b.Mode.Perm() {
+		return true
+	}
+	// Unchanged compara tamanho, tipo e mtime; aqui só o mtime interessa,
+	// então os outros campos são igualados antes da comparação.
+	a.Size, b.Size = 0, 0
+	a.IsDir, b.IsDir = false, false
+	return !a.Unchanged(b)
 }

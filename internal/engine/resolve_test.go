@@ -582,3 +582,145 @@ func TestReconcileEqualModesIsNoop(t *testing.T) {
 		t.Error("par já convergido foi tocado sem motivo")
 	}
 }
+
+// TestReconcilePropagatesDirectoryMode é regressão de um caso que a comparação
+// de metadados anterior não pegava: reconcileBothSides devolvia noop assim que
+// via dois diretórios, antes de olhar qualquer atributo.
+func TestReconcilePropagatesDirectoryMode(t *testing.T) {
+	eng, cfg, _ := newIdleEngine(t, nil)
+	ctx := context.Background()
+
+	rel := "publico"
+	absA, absB := filepath.Join(cfg.A, rel), filepath.Join(cfg.B, rel)
+	for _, p := range []string{absA, absB} {
+		if err := os.MkdirAll(p, 0o750); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := eng.recordPair(ctx, rel, absA, absB, true); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.Chmod(absA, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := eng.reconcile(ctx, "teste", "."); err != nil {
+		t.Fatal(err)
+	}
+
+	fi, err := os.Stat(absB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := fi.Mode().Perm(); got != 0o700 {
+		t.Errorf("modo do diretório em B = %o, quero 700", got)
+	}
+}
+
+// TestReconcilePropagatesMtimeOnlyChange cobre o `touch`: conteúdo e modo
+// idênticos, só o mtime diferente.
+//
+// Deixar isso passar não era cosmético. Um par sincronizado tem mtimes
+// idênticos, e sampledButStale conta com isso para detectar alterações que a
+// amostra não vê. Com o mtime divergindo à toa, cada resync retransferiria o
+// arquivo grande inteiro, para sempre, sem nunca convergir.
+func TestReconcilePropagatesMtimeOnlyChange(t *testing.T) {
+	eng, cfg, _ := newIdleEngine(t, nil)
+	ctx := context.Background()
+
+	rel := "tempo.txt"
+	absA, absB := filepath.Join(cfg.A, rel), filepath.Join(cfg.B, rel)
+	for _, p := range []string{absA, absB} {
+		if err := os.WriteFile(p, []byte("mesmo conteudo"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	synced := time.Now().Add(-time.Hour)
+	for _, p := range []string{absA, absB} {
+		if err := os.Chtimes(p, synced, synced); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := eng.recordPair(ctx, rel, absA, absB, false); err != nil {
+		t.Fatal(err)
+	}
+
+	touched := synced.Add(-30 * 24 * time.Hour)
+	if err := os.Chtimes(absA, touched, touched); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := eng.reconcile(ctx, "teste", "."); err != nil {
+		t.Fatal(err)
+	}
+
+	stA, err := os.Stat(absA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stB, err := os.Stat(absB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d := stA.ModTime().Sub(stB.ModTime()); d > time.Second || d < -time.Second {
+		t.Errorf("mtimes seguem divergentes: A=%s B=%s", stA.ModTime(), stB.ModTime())
+	}
+
+	// O conteúdo não pode ter sido tocado.
+	got, err := os.ReadFile(absB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "mesmo conteudo" {
+		t.Errorf("conteúdo = %q, deveria estar intacto", got)
+	}
+}
+
+// Depois de convergir os atributos, um segundo resync não deve encontrar mais
+// nada — senão a divergência de mtime viraria trabalho perpétuo.
+func TestReconcileAttrsConvergesInOnePass(t *testing.T) {
+	eng, cfg, _ := newIdleEngine(t, nil)
+	ctx := context.Background()
+
+	rel := "tempo.txt"
+	absA, absB := filepath.Join(cfg.A, rel), filepath.Join(cfg.B, rel)
+	for _, p := range []string{absA, absB} {
+		if err := os.WriteFile(p, []byte("igual"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := eng.recordPair(ctx, rel, absA, absB, false); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-48 * time.Hour)
+	if err := os.Chtimes(absA, old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := eng.reconcile(ctx, "primeira", "."); err != nil {
+		t.Fatal(err)
+	}
+	// Depois da primeira passada, nada mais pode se mexer.
+	beforeA, err := os.Stat(absA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeB, err := os.Stat(absB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := eng.reconcile(ctx, "segunda", "."); err != nil {
+		t.Fatal(err)
+	}
+	afterA, err := os.Stat(absA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	afterB, err := os.Stat(absB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !beforeA.ModTime().Equal(afterA.ModTime()) || !beforeB.ModTime().Equal(afterB.ModTime()) {
+		t.Error("a segunda passada mexeu nos arquivos: os atributos não convergiram")
+	}
+}

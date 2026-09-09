@@ -145,7 +145,7 @@ reconciliação que a perdia.
 
 ### Metadados na reconciliação
 
-Conteúdo idêntico não encerra a comparação: modo e permissões também são
+Conteúdo idêntico não encerra a comparação: modo e mtime também são
 sincronizados, e a reconciliação passou a compará-los.
 
 O buraco era assimétrico e por isso passou despercebido. O caminho de eventos
@@ -155,9 +155,26 @@ nenhum resync — o modo divergente ficava para sempre. Pior, `diff -rq` não
 compara permissões, então uma verificação superficial das duas árvores diria
 que estavam idênticas.
 
+Vale para arquivos e para diretórios. A primeira versão desta comparação só
+cobria arquivos, porque `reconcileBothSides` devolvia `noop` assim que via dois
+diretórios — antes de olhar atributo nenhum.
+
+O mtime entra na comparação junto com o modo, e não por completude. Um par
+sincronizado tem mtimes idênticos, e `sampledButStale` conta com isso para
+detectar alterações que a amostra não vê. Deixar o mtime divergir por conta de
+um `touch` faria cada resync retransferir o arquivo grande inteiro, para
+sempre, sem nunca convergir.
+
 A origem é decidida como no conteúdo, pelo estado. Quando os dois lados
-mudaram o modo, vence o mtime mais recente: permissões não são dados, e
-preservar as duas versões não significaria nada.
+mudaram, vence o mtime mais recente: atributos não são dados, e preservar as
+duas versões não significaria nada.
+
+**Custo aceito:** quando um arquivo acima de `hash_max_bytes` tem só o mtime
+alterado, a reconciliação não consegue distinguir isso de uma alteração no meio
+que a amostra não vê — as duas situações são idênticas para ela. Escolhe o
+lado seguro e copia o conteúdo. O algoritmo delta do rsync transfere pouco,
+mas os dois arquivos são lidos por inteiro. Um `touch` num arquivo de 100 GiB
+custa uma leitura de 100 GiB de cada lado, uma vez.
 
 ### Estado perdido
 
