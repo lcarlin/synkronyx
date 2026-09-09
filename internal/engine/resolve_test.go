@@ -458,3 +458,127 @@ func TestReconcileWithoutBaselineIsAConflict(t *testing.T) {
 		t.Error("par sem linha de base deveria ter sido tratado como conflito")
 	}
 }
+
+// TestReconcilePropagatesModeChange é regressão de uma alteração que se
+// perdia por completo: um chmod feito com o serviço parado não gera evento, e
+// a reconciliação só comparava conteúdo — então o modo divergente sobrevivia a
+// qualquer número de resyncs.
+//
+// A seção 2 do escopo lista metadados entre as operações contempladas, e o
+// caminho de eventos já as tratava. Era a reconciliação que as ignorava.
+func TestReconcilePropagatesModeChange(t *testing.T) {
+	eng, cfg, db := newIdleEngine(t, nil)
+	ctx := context.Background()
+
+	rel := "restrito.txt"
+	absA, absB := filepath.Join(cfg.A, rel), filepath.Join(cfg.B, rel)
+	for _, p := range []string{absA, absB} {
+		if err := os.WriteFile(p, []byte("mesmo conteudo"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := eng.recordPair(ctx, rel, absA, absB, false); err != nil {
+		t.Fatal(err)
+	}
+
+	// Só o modo muda, e só em A.
+	if err := os.Chmod(absA, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := eng.reconcile(ctx, "teste", "."); err != nil {
+		t.Fatal(err)
+	}
+
+	fi, err := os.Stat(absB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := fi.Mode().Perm(); got != 0o755 {
+		t.Errorf("modo em B = %o, quero 755", got)
+	}
+
+	// O conteúdo não pode ter sido tocado, e nada disso é conflito.
+	content, err := os.ReadFile(absB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(content) != "mesmo conteudo" {
+		t.Errorf("conteúdo alterado: %q", content)
+	}
+	conflicts, err := db.UnresolvedConflicts(ctx, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(conflicts) != 0 {
+		t.Errorf("mudança de modo virou conflito: %v", conflicts)
+	}
+}
+
+func TestReconcileModeChangeFromB(t *testing.T) {
+	eng, cfg, _ := newIdleEngine(t, nil)
+	ctx := context.Background()
+
+	rel := "f.txt"
+	absA, absB := filepath.Join(cfg.A, rel), filepath.Join(cfg.B, rel)
+	for _, p := range []string{absA, absB} {
+		if err := os.WriteFile(p, []byte("igual"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := eng.recordPair(ctx, rel, absA, absB, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(absB, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := eng.reconcile(ctx, "teste", "."); err != nil {
+		t.Fatal(err)
+	}
+	fi, err := os.Stat(absA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := fi.Mode().Perm(); got != 0o600 {
+		t.Errorf("modo em A = %o, quero 600", got)
+	}
+}
+
+// Modos iguais não devem gerar trabalho nenhum.
+func TestReconcileEqualModesIsNoop(t *testing.T) {
+	eng, cfg, _ := newIdleEngine(t, nil)
+	ctx := context.Background()
+
+	rel := "f.txt"
+	absA, absB := filepath.Join(cfg.A, rel), filepath.Join(cfg.B, rel)
+	for _, p := range []string{absA, absB} {
+		if err := os.WriteFile(p, []byte("igual"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	when := time.Unix(1_700_000_000, 0)
+	for _, p := range []string{absA, absB} {
+		if err := os.Chtimes(p, when, when); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := eng.recordPair(ctx, rel, absA, absB, false); err != nil {
+		t.Fatal(err)
+	}
+
+	before, err := os.Stat(absB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := eng.reconcile(ctx, "teste", "."); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.Stat(absB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !before.ModTime().Equal(after.ModTime()) {
+		t.Error("par já convergido foi tocado sem motivo")
+	}
+}

@@ -533,7 +533,14 @@ func (e *Engine) reconcileBothSides(ctx context.Context, rel string, stA, stB ha
 		return reconcileNoop, err
 	}
 	if !differs {
-		// Conteúdos iguais: basta registrar o estado, sem transferir nada.
+		// Conteúdos iguais não encerram o assunto: modo e permissões também
+		// são sincronizados (seção 2 do escopo), e uma alteração de atributos
+		// feita com o serviço parado não gerou evento nenhum. Só a
+		// reconciliação pode notá-la.
+		if stA.Mode.Perm() != stB.Mode.Perm() {
+			return e.reconcileAttrs(ctx, rel, stA, stB)
+		}
+		// Nada a fazer além de registrar o estado.
 		return reconcileNoop, e.recordPair(ctx, rel, absA, absB, false)
 	}
 
@@ -656,4 +663,57 @@ func sideChanged(current hash.Digest, st hash.Stat, recorded state.Entry) bool {
 		return !st.Unchanged(recorded.Stat())
 	}
 	return false
+}
+
+// reconcileAttrs propaga uma divergência de permissões entre lados cujo
+// conteúdo é idêntico.
+//
+// A origem é decidida pelo estado, como no caso de conteúdo: se apenas um lado
+// se afastou do modo registrado, aquele lado manda. Quando os dois mudaram,
+// vence o mtime mais recente — permissões não são dados, e preservar as duas
+// versões, como se faz com conteúdo em conflito, não significaria nada.
+func (e *Engine) reconcileAttrs(ctx context.Context, rel string, stA, stB hash.Stat) (reconcileResult, error) {
+	entryA, err := e.db.Get(ctx, event.SideA, rel)
+	if err != nil {
+		return reconcileNoop, err
+	}
+	entryB, err := e.db.Get(ctx, event.SideB, rel)
+	if err != nil {
+		return reconcileNoop, err
+	}
+
+	origin := event.SideA
+	switch {
+	case entryA != nil && entryB != nil:
+		changedA := stA.Mode.Perm() != entryA.Mode.Perm()
+		changedB := stB.Mode.Perm() != entryB.Mode.Perm()
+		switch {
+		case changedA && !changedB:
+			origin = event.SideA
+		case changedB && !changedA:
+			origin = event.SideB
+		default:
+			origin = newerSide(stA, stB)
+		}
+	default:
+		origin = newerSide(stA, stB)
+	}
+
+	e.log.Info("propagando permissões divergentes", "path", rel,
+		"origem", origin.String(),
+		"modo_a", stA.Mode.Perm().String(), "modo_b", stB.Mode.Perm().String())
+
+	ev := event.Event{Side: origin, Kind: event.KindAttrib, Path: rel, At: time.Now()}
+	if err := e.propagateAttrs(ctx, ev,
+		e.abs(origin, rel), e.abs(origin.Opposite(), rel)); err != nil {
+		return reconcileNoop, err
+	}
+	return reconcileApplied, nil
+}
+
+func newerSide(stA, stB hash.Stat) event.Side {
+	if stB.MTime.After(stA.MTime) {
+		return event.SideB
+	}
+	return event.SideA
 }

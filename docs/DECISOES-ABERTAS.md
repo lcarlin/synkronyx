@@ -143,6 +143,22 @@ arquivo `.sync-conflict-` sem motivo.
 O caminho de eventos já fazia a checagem certa, em `detectConflict`. Era a
 reconciliação que a perdia.
 
+### Metadados na reconciliação
+
+Conteúdo idêntico não encerra a comparação: modo e permissões também são
+sincronizados, e a reconciliação passou a compará-los.
+
+O buraco era assimétrico e por isso passou despercebido. O caminho de eventos
+tratava `IN_ATTRIB` desde o início; a reconciliação só olhava conteúdo. Um
+`chmod` feito com o serviço parado não gerava evento e não era notado por
+nenhum resync — o modo divergente ficava para sempre. Pior, `diff -rq` não
+compara permissões, então uma verificação superficial das duas árvores diria
+que estavam idênticas.
+
+A origem é decidida como no conteúdo, pelo estado. Quando os dois lados
+mudaram o modo, vence o mtime mais recente: permissões não são dados, e
+preservar as duas versões não significaria nada.
+
 ### Estado perdido
 
 Detectado e avisado, com a condição precisa: banco vazio **e** First Sync já

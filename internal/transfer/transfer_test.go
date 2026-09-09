@@ -156,3 +156,57 @@ func TestCheckRejectsNonRsync(t *testing.T) {
 		t.Error("Check aceitou um binário que não é o rsync")
 	}
 }
+
+// SyncAttrs precisa propagar permissões sem tocar no conteúdo.
+func TestSyncAttrsPropagatesModeWithoutTouchingContent(t *testing.T) {
+	xf := newTransfer(t)
+	dir := t.TempDir()
+
+	src := filepath.Join(dir, "origem.txt")
+	dst := filepath.Join(dir, "destino.txt")
+	if err := os.WriteFile(src, []byte("mesmo conteudo"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dst, []byte("mesmo conteudo"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := xf.SyncAttrs(context.Background(), src, dst); err != nil {
+		t.Fatal(err)
+	}
+
+	fi, err := os.Stat(dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := fi.Mode().Perm(); got != 0o755 {
+		t.Errorf("modo = %o, quero 755", got)
+	}
+	got, err := os.ReadFile(dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "mesmo conteudo" {
+		t.Errorf("conteúdo = %q, deveria estar intacto", got)
+	}
+}
+
+// --existing impede que SyncAttrs crie o arquivo: ele só ajusta atributos de
+// algo que já existe.
+func TestSyncAttrsDoesNotCreateMissingFile(t *testing.T) {
+	xf := newTransfer(t)
+	dir := t.TempDir()
+
+	src := filepath.Join(dir, "origem.txt")
+	if err := os.WriteFile(src, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dst := filepath.Join(dir, "inexistente.txt")
+
+	if err := xf.SyncAttrs(context.Background(), src, dst); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(dst); !os.IsNotExist(err) {
+		t.Error("SyncAttrs criou um arquivo que não existia")
+	}
+}
