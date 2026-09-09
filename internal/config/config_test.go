@@ -273,3 +273,9 @@ func TestDefaultRetryInitialDelay(t *testing.T) {
 		t.Errorf("RetryInitialDelay padrão = %s, quero 5s", got)
 	}
 }
+
+func TestDefaultRetryMaxDelay(t *testing.T) {
+	if got := Default().RetryMaxDelay; got != 10*time.Minute {
+		t.Errorf("RetryMaxDelay padrão = %s, quero 10m", got)
+	}
+}

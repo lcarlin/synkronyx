@@ -171,7 +171,7 @@ func Default() Config {
 
 		RetryMaxAttempts:  8,
 		RetryInitialDelay: 5 * time.Second,
-		RetryMaxDelay:     5 * time.Minute,
+		RetryMaxDelay:     10 * time.Minute,
 
 		HeartbeatInterval: 15 * time.Second,
 

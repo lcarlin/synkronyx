@@ -106,7 +106,7 @@ func TestDefaultBackoffSequence(t *testing.T) {
 
 	want := []time.Duration{
 		5 * time.Second, 10 * time.Second, 20 * time.Second, 40 * time.Second,
-		80 * time.Second, 160 * time.Second, 5 * time.Minute,
+		80 * time.Second, 160 * time.Second, 320 * time.Second,
 	}
 
 	var total time.Duration
@@ -117,11 +117,18 @@ func TestDefaultBackoffSequence(t *testing.T) {
 		}
 		total += got
 	}
-	if total != 10*time.Minute+15*time.Second {
-		t.Errorf("janela total = %s, quero 10m15s", total)
+	if total != 10*time.Minute+35*time.Second {
+		t.Errorf("janela total = %s, quero 10m35s", total)
 	}
-	// A última espera é cortada pelo teto; sem ele seria 5m20s.
-	if q.backoff(len(want)) != cfg.RetryMaxDelay {
-		t.Error("a última tentativa deveria estar limitada por retry_max_delay")
+
+	// Com estes padrões o teto não é alcançado: a maior espera é 5m20s,
+	// abaixo dos 10m de retry_max_delay. Ele só passa a cortar se
+	// retry_max_attempts subir para 9 ou mais.
+	if last := q.backoff(len(want)); last >= cfg.RetryMaxDelay {
+		t.Errorf("backoff(%d) = %s, esperado abaixo do teto de %s",
+			len(want), last, cfg.RetryMaxDelay)
+	}
+	if q.backoff(len(want)+1) != cfg.RetryMaxDelay {
+		t.Error("a oitava espera deveria ser cortada pelo teto")
 	}
 }
