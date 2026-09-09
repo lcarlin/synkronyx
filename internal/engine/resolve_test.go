@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/lcarlin/synkronyx/internal/config"
+	"github.com/lcarlin/synkronyx/internal/event"
 	"github.com/lcarlin/synkronyx/internal/hash"
 )
 
@@ -815,5 +816,62 @@ func TestReconcilePropagatesSpecialBits(t *testing.T) {
 	}
 	if fi.Mode()&os.ModeSetgid == 0 || fi.Mode()&os.ModeSetuid != 0 {
 		t.Errorf("bits especiais não reconciliados; modo em B = %v", fi.Mode())
+	}
+}
+
+// TestOwnershipNotComparedWithoutPrivilege é a proteção contra o trabalho
+// perpétuo: sem privilégio para chown, comparar dono produziria divergência
+// detectada e nunca resolvida, refeita em todo resync — exatamente o defeito
+// que os symlinks tinham.
+func TestOwnershipNotComparedWithoutPrivilege(t *testing.T) {
+	eng, _, _ := newIdleEngine(t, nil)
+
+	a := hash.Stat{Uid: 1000, Gid: 1000, Mode: 0o644}
+	b := hash.Stat{Uid: 0, Gid: 0, Mode: 0o644}
+
+	if os.Geteuid() == 0 {
+		if !eng.syncOwnership {
+			t.Fatal("rodando como root, ownership deveria entrar na reconciliação")
+		}
+		if !eng.attrsDiverged(a, b) {
+			t.Error("como root, donos diferentes são divergência")
+		}
+		return
+	}
+
+	if eng.syncOwnership {
+		t.Fatal("sem privilégio, ownership não deveria entrar na reconciliação")
+	}
+	if eng.attrsDiverged(a, b) {
+		t.Error("sem poder aplicar chown, a divergência de dono não pode ser reportada")
+	}
+}
+
+// O estado precisa registrar dono e grupo, senão a reconciliação não tem base
+// para dizer qual lado mudou a propriedade.
+func TestStateRecordsOwner(t *testing.T) {
+	eng, cfg, db := newIdleEngine(t, nil)
+	ctx := context.Background()
+
+	rel := "f.txt"
+	absA, absB := filepath.Join(cfg.A, rel), filepath.Join(cfg.B, rel)
+	for _, p := range []string{absA, absB} {
+		if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := eng.recordPair(ctx, rel, absA, absB, false); err != nil {
+		t.Fatal(err)
+	}
+
+	entry, err := db.Get(ctx, event.SideA, rel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if entry == nil {
+		t.Fatal("entrada não gravada")
+	}
+	if entry.Uid != os.Getuid() || entry.Gid != os.Getgid() {
+		t.Errorf("dono gravado = %d:%d, quero %d:%d", entry.Uid, entry.Gid, os.Getuid(), os.Getgid())
 	}
 }

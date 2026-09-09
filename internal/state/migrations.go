@@ -7,7 +7,7 @@ import (
 
 // schemaVersion é a versão de schema que este binário espera. Guardada no
 // PRAGMA user_version do próprio arquivo SQLite.
-const schemaVersion = 3
+const schemaVersion = 4
 
 // migrations[i] leva o banco da versão i para i+1. Só se acrescenta ao fim;
 // nunca se edita uma entrada já publicada, porque bancos em produção já a
@@ -30,6 +30,14 @@ var migrations = []string{
 		applied_at   INTEGER,
 		error        TEXT
 	) WITHOUT ROWID;`,
+
+	// v3 -> v4: dono e grupo passam a ser registrados, para que a
+	// reconciliação possa dizer QUAL lado mudou a propriedade — e não apenas
+	// que os dois lados diferem. O default -1 marca "desconhecido" nas linhas
+	// já existentes; 0 seria o root, e confundir os dois faria a
+	// reconciliação ver divergência onde não há.
+	`ALTER TABLE entries ADD COLUMN uid INTEGER NOT NULL DEFAULT -1;
+	 ALTER TABLE entries ADD COLUMN gid INTEGER NOT NULL DEFAULT -1;`,
 }
 
 // migrate aplica as migrações pendentes.

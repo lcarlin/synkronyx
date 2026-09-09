@@ -504,7 +504,7 @@ func (e *Engine) reconcileBothSides(ctx context.Context, rel string, stA, stB ha
 		// Existir dos dois lados não significa estar igual: modo e mtime de
 		// um diretório também são sincronizados. Retornar aqui sem comparar,
 		// como se fazia, deixava um chmod em diretório invisível para sempre.
-		if attrsDiverged(stA, stB) {
+		if e.attrsDiverged(stA, stB) {
 			return e.reconcileAttrs(ctx, rel, stA, stB)
 		}
 		return reconcileNoop, nil
@@ -543,7 +543,7 @@ func (e *Engine) reconcileBothSides(ctx context.Context, rel string, stA, stB ha
 		// são sincronizados (seção 2 do escopo), e uma alteração de atributos
 		// feita com o serviço parado não gerou evento nenhum. Só a
 		// reconciliação pode notá-la.
-		if attrsDiverged(stA, stB) {
+		if e.attrsDiverged(stA, stB) {
 			return e.reconcileAttrs(ctx, rel, stA, stB)
 		}
 		// Nada a fazer além de registrar o estado.
@@ -691,8 +691,8 @@ func (e *Engine) reconcileAttrs(ctx context.Context, rel string, stA, stB hash.S
 	origin := event.SideA
 	switch {
 	case entryA != nil && entryB != nil:
-		changedA := attrsDiverged(stA, entryA.Stat())
-		changedB := attrsDiverged(stB, entryB.Stat())
+		changedA := e.attrsDiverged(stA, entryA.Stat())
+		changedB := e.attrsDiverged(stB, entryB.Stat())
 
 		switch {
 		case changedA && !changedB:
@@ -706,10 +706,17 @@ func (e *Engine) reconcileAttrs(ctx context.Context, rel string, stA, stB hash.S
 		origin = newerSide(stA, stB)
 	}
 
-	e.log.Info("propagando atributos divergentes", "path", rel,
-		"origem", origin.String(),
+	attrs := []any{
+		"path", rel, "origem", origin.String(),
 		"modo_a", stA.Perms().String(), "modo_b", stB.Perms().String(),
-		"mtime_a", stA.MTime.Format(time.RFC3339), "mtime_b", stB.MTime.Format(time.RFC3339))
+		"mtime_a", stA.MTime.Format(time.RFC3339), "mtime_b", stB.MTime.Format(time.RFC3339),
+	}
+	if e.syncOwnership {
+		attrs = append(attrs,
+			"dono_a", fmt.Sprintf("%d:%d", stA.Uid, stA.Gid),
+			"dono_b", fmt.Sprintf("%d:%d", stB.Uid, stB.Gid))
+	}
+	e.log.Info("propagando atributos divergentes", attrs...)
 
 	ev := event.Event{Side: origin, Kind: event.KindAttrib, Path: rel, At: time.Now()}
 	if err := e.propagateAttrs(ctx, ev,
@@ -737,7 +744,13 @@ func newerSide(stA, stB hash.Stat) event.Side {
 //
 // A tolerância de um segundo vem de Stat.Unchanged, e existe porque nem todo
 // filesystem guarda sub-segundo.
-func attrsDiverged(a, b hash.Stat) bool {
+func (e *Engine) attrsDiverged(a, b hash.Stat) bool {
+	// Dono e grupo só entram quando o processo pode alterá-los. Ver o campo
+	// Engine.syncOwnership.
+	if e.syncOwnership && !a.SameOwner(b) {
+		return true
+	}
+
 	// Perms, e não Perm(): setuid, setgid e sticky também são sincronizados, e
 	// Perm() os descartaria.
 	if a.Perms() != b.Perms() {

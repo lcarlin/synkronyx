@@ -181,6 +181,30 @@ pelo mesmo motivo. Ignorar o mtime do link não era opção: a divergência era
 detectada, a sincronização não a resolvia, e cada resync refazia o mesmo
 trabalho para sempre.
 
+### Dono e grupo
+
+Reconciliados **apenas quando o processo pode alterá-los** — isto é, quando roda
+como root. A condição é de privilégio, não de configuração, e não há knob para
+forçá-la.
+
+O motivo é o mesmo defeito que os symlinks tinham. Sem privilégio, todo `chown`
+falha com EPERM: a divergência seria detectada, nunca resolvida, e refeita em
+toda reconciliação, para sempre. Melhor não comparar do que comparar sem poder
+agir — e dizer isso em voz alta, que é o que o aviso de subida faz.
+
+O estado registra uid e gid (schema v4). Linhas gravadas antes disso valem
+`hash.UnknownOwner` (-1), e "desconhecido" nunca conta como divergência: 0 é o
+root, e confundir os dois faria a reconciliação ver diferença onde não há.
+
+`Lchown`, nunca `Chown`: em um symlink, `Chown` mudaria o dono do alvo, que é
+outro arquivo e pode estar fora da árvore.
+
+**Limitação de verificação:** o branch privilegiado não foi exercitado como
+root — a máquina de desenvolvimento não permite `sudo` sem senha nem user
+namespaces. O que os testes cobrem é a lógica de decisão (com
+`syncOwnership` alternado) e o `chown` real através de um grupo secundário, que
+um processo comum pode alterar. Trocar de uid arbitrário segue não verificado.
+
 **Custo aceito:** quando um arquivo acima de `hash_max_bytes` tem só o mtime
 alterado, a reconciliação não consegue distinguir isso de uma alteração no meio
 que a amostra não vê — as duas situações são idênticas para ela. Escolhe o

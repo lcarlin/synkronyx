@@ -24,6 +24,7 @@ import (
 	"github.com/lcarlin/synkronyx/internal/event"
 	"github.com/lcarlin/synkronyx/internal/guard"
 	"github.com/lcarlin/synkronyx/internal/hash"
+	"github.com/lcarlin/synkronyx/internal/preflight"
 	"github.com/lcarlin/synkronyx/internal/state"
 	"github.com/lcarlin/synkronyx/internal/transfer"
 	"github.com/lcarlin/synkronyx/internal/watcher"
@@ -49,6 +50,11 @@ type Engine struct {
 	watchers map[event.Side]*watcher.Watcher
 	roots    map[event.Side]string
 
+	// syncOwnership diz se dono e grupo entram na reconciliação. Depende de
+	// privilégio, não de configuração: comparar sem poder aplicar produziria
+	// divergência detectada e nunca resolvida, refeita em todo resync.
+	syncOwnership bool
+
 	resync chan string  // pedidos de Full Resync, com o motivo
 	fatal  chan error   // falhas que exigem encerrar o serviço
 	failed chan failure // falhas de propagação, vindas dos workers
@@ -65,18 +71,20 @@ type failure struct {
 // New monta o engine. Não toca em disco nem sobe watchers — isso é Run.
 func New(cfg config.Config, db *state.DB, log *slog.Logger) *Engine {
 	return &Engine{
-		cfg:      cfg,
-		log:      log,
-		db:       db,
-		guard:    guard.New(cfg.SelfWriteTTL),
-		xfer:     transfer.New(cfg.RsyncPath, cfg.RsyncArgs, cfg.PreserveHardlinks),
-		debo:     debounce.New(cfg.Debounce),
-		retry:    newRetryQueue(cfg.RetryMaxAttempts, cfg.RetryInitialDelay, cfg.RetryMaxDelay),
-		watchers: make(map[event.Side]*watcher.Watcher, 2),
-		roots:    map[event.Side]string{event.SideA: cfg.A, event.SideB: cfg.B},
-		resync:   make(chan string, 1),
-		fatal:    make(chan error, 2),
-		failed:   make(chan failure, 256),
+		cfg:   cfg,
+		log:   log,
+		db:    db,
+		guard: guard.New(cfg.SelfWriteTTL),
+		xfer: transfer.New(cfg.RsyncPath, cfg.RsyncArgs, cfg.PreserveHardlinks,
+			preflight.PreservesOwnership()),
+		syncOwnership: preflight.PreservesOwnership(),
+		debo:          debounce.New(cfg.Debounce),
+		retry:         newRetryQueue(cfg.RetryMaxAttempts, cfg.RetryInitialDelay, cfg.RetryMaxDelay),
+		watchers:      make(map[event.Side]*watcher.Watcher, 2),
+		roots:         map[event.Side]string{event.SideA: cfg.A, event.SideB: cfg.B},
+		resync:        make(chan string, 1),
+		fatal:         make(chan error, 2),
+		failed:        make(chan failure, 256),
 	}
 }
 
@@ -546,6 +554,7 @@ func (e *Engine) entryFor(side event.Side, rel, abs string, at time.Time) (state
 	entry := state.Entry{
 		Path: rel, Side: side, IsDir: st.IsDir, Size: st.Size,
 		MTime: st.MTime, Mode: st.Mode, SyncedAt: at, Status: state.StatusSynced,
+		Uid: st.Uid, Gid: st.Gid,
 	}
 	if !st.IsDir {
 		d, err := e.digestOf(abs)

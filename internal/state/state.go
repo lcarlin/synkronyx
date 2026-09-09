@@ -58,11 +58,19 @@ type Entry struct {
 	Digest   hash.Digest
 	SyncedAt time.Time
 	Status   string
+
+	// Uid e Gid valem hash.UnknownOwner em entradas gravadas antes da v4 do
+	// schema.
+	Uid int
+	Gid int
 }
 
 // Stat converte a entrada para a identidade barata usada nas comparações.
 func (e Entry) Stat() hash.Stat {
-	return hash.Stat{Size: e.Size, MTime: e.MTime, Mode: e.Mode, IsDir: e.IsDir}
+	return hash.Stat{
+		Size: e.Size, MTime: e.MTime, Mode: e.Mode, IsDir: e.IsDir,
+		Uid: e.Uid, Gid: e.Gid,
+	}
 }
 
 // DB é o estado persistente.
@@ -99,7 +107,7 @@ func Open(path string) (*DB, error) {
 
 func (d *DB) Close() error { return d.db.Close() }
 
-const entryColumns = `path, side, is_dir, size, mtime_ns, mode, COALESCE(digest, ''), synced_at, status`
+const entryColumns = `path, side, is_dir, size, mtime_ns, mode, COALESCE(digest, ''), synced_at, status, uid, gid`
 
 // scanEntry lê uma linha na ordem de entryColumns.
 func scanEntry(sc interface{ Scan(...any) error }) (Entry, error) {
@@ -112,7 +120,8 @@ func scanEntry(sc interface{ Scan(...any) error }) (Entry, error) {
 		digest  string
 		synced  int64
 	)
-	if err := sc.Scan(&e.Path, &sideInt, &isDir, &e.Size, &mtimeNS, &mode, &digest, &synced, &e.Status); err != nil {
+	if err := sc.Scan(&e.Path, &sideInt, &isDir, &e.Size, &mtimeNS, &mode, &digest,
+		&synced, &e.Status, &e.Uid, &e.Gid); err != nil {
 		return Entry{}, err
 	}
 
@@ -146,12 +155,13 @@ func (d *DB) Get(ctx context.Context, side event.Side, path string) (*Entry, err
 }
 
 const upsertEntry = `
-	INSERT INTO entries (path, side, is_dir, size, mtime_ns, mode, digest, synced_at, status)
-	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+	INSERT INTO entries (path, side, is_dir, size, mtime_ns, mode, digest, synced_at, status, uid, gid)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	ON CONFLICT(path, side) DO UPDATE SET
 		is_dir = excluded.is_dir, size = excluded.size, mtime_ns = excluded.mtime_ns,
 		mode = excluded.mode, digest = excluded.digest,
-		synced_at = excluded.synced_at, status = excluded.status`
+		synced_at = excluded.synced_at, status = excluded.status,
+		uid = excluded.uid, gid = excluded.gid`
 
 // entryArgs monta os argumentos de upsertEntry, aplicando os defaults.
 func entryArgs(e Entry) []any {
@@ -167,7 +177,7 @@ func entryArgs(e Entry) []any {
 	}
 	return []any{
 		e.Path, int(e.Side), boolInt(e.IsDir), e.Size, e.MTime.UnixNano(),
-		int64(e.Mode), digest, e.SyncedAt.UnixNano(), e.Status,
+		int64(e.Mode), digest, e.SyncedAt.UnixNano(), e.Status, e.Uid, e.Gid,
 	}
 }
 

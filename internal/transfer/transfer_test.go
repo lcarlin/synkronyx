@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/lcarlin/synkronyx/internal/hash"
 )
 
 func newTransfer(t *testing.T) *Transfer {
@@ -14,7 +16,7 @@ func newTransfer(t *testing.T) *Transfer {
 	if _, err := exec.LookPath("rsync"); err != nil {
 		t.Skip("rsync não disponível")
 	}
-	return New("rsync", []string{"--archive", "--partial", "--inplace", "--numeric-ids"}, false)
+	return New("rsync", []string{"--archive", "--partial", "--inplace", "--numeric-ids"}, false, false)
 }
 
 // Regressão do bug mais custoso do projeto: dois arquivos de mesmo tamanho e
@@ -151,7 +153,7 @@ func TestCheckRejectsNonRsync(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	xf := New(fake, nil, false)
+	xf := New(fake, nil, false, false)
 	if err := xf.Check(context.Background()); err == nil {
 		t.Error("Check aceitou um binário que não é o rsync")
 	}
@@ -297,5 +299,129 @@ func TestSyncAttrsTouchesSymlinkNotTarget(t *testing.T) {
 	}
 	if !alvoAntes.ModTime().Equal(alvoDepois.ModTime()) {
 		t.Error("o mtime do alvo foi alterado; a operação seguiu o symlink")
+	}
+}
+
+// secondaryGid devolve um gid do qual o usuário é membro e que não é o
+// primário — a única divergência de propriedade que um processo sem privilégio
+// consegue criar, e portanto a única forma de exercitar o chown de verdade
+// sem ser root.
+func secondaryGid(t *testing.T) int {
+	t.Helper()
+	gids, err := os.Getgroups()
+	if err != nil {
+		t.Skipf("não foi possível listar grupos: %v", err)
+	}
+	primary := os.Getgid()
+	for _, g := range gids {
+		if g != primary {
+			return g
+		}
+	}
+	t.Skip("usuário não pertence a nenhum grupo secundário")
+	return -1
+}
+
+func TestSyncAttrsPropagatesGroup(t *testing.T) {
+	xf := New("rsync", []string{"--archive"}, false, true)
+	dir := t.TempDir()
+	other := secondaryGid(t)
+
+	src := filepath.Join(dir, "origem.txt")
+	dst := filepath.Join(dir, "destino.txt")
+	for _, p := range []string{src, dst} {
+		if err := os.WriteFile(p, []byte("igual"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Divergência real de propriedade: src no grupo secundário, dst no primário.
+	if err := os.Lchown(src, -1, other); err != nil {
+		t.Skipf("chown para o grupo %d indisponível: %v", other, err)
+	}
+
+	if err := xf.SyncAttrs(context.Background(), src, dst); err != nil {
+		t.Fatal(err)
+	}
+
+	st, err := hash.StatOf(dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Gid != other {
+		t.Errorf("gid do destino = %d, quero %d", st.Gid, other)
+	}
+}
+
+// Sem syncOwnership, a propriedade não é tocada — nem para melhor.
+func TestSyncAttrsSkipsOwnerWhenDisabled(t *testing.T) {
+	xf := New("rsync", []string{"--archive"}, false, false)
+	dir := t.TempDir()
+	other := secondaryGid(t)
+
+	src := filepath.Join(dir, "origem.txt")
+	dst := filepath.Join(dir, "destino.txt")
+	for _, p := range []string{src, dst} {
+		if err := os.WriteFile(p, []byte("igual"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Lchown(src, -1, other); err != nil {
+		t.Skipf("chown indisponível: %v", err)
+	}
+
+	if err := xf.SyncAttrs(context.Background(), src, dst); err != nil {
+		t.Fatal(err)
+	}
+	st, err := hash.StatOf(dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Gid == other {
+		t.Error("a propriedade foi alterada com syncOwnership desligado")
+	}
+}
+
+// O chown de um symlink precisa agir no link, não no alvo.
+func TestSyncAttrsChownsSymlinkNotTarget(t *testing.T) {
+	xf := New("rsync", []string{"--archive"}, false, true)
+	dir := t.TempDir()
+	other := secondaryGid(t)
+
+	alvo := filepath.Join(dir, "alvo.txt")
+	if err := os.WriteFile(alvo, []byte("conteudo"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	src := filepath.Join(dir, "link-src")
+	dst := filepath.Join(dir, "link-dst")
+	for _, p := range []string{src, dst} {
+		if err := os.Symlink("alvo.txt", p); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Lchown(src, -1, other); err != nil {
+		t.Skipf("lchown indisponível: %v", err)
+	}
+
+	alvoAntes, err := hash.StatOf(alvo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := xf.SyncAttrs(context.Background(), src, dst); err != nil {
+		t.Fatal(err)
+	}
+
+	linkDepois, err := hash.StatOf(dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if linkDepois.Gid != other {
+		t.Errorf("gid do link = %d, quero %d", linkDepois.Gid, other)
+	}
+	alvoDepois, err := hash.StatOf(alvo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if alvoDepois.Gid != alvoAntes.Gid {
+		t.Error("o grupo do alvo foi alterado: a operação seguiu o symlink")
 	}
 }

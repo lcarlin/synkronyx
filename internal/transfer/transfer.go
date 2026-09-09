@@ -28,11 +28,14 @@ type Transfer struct {
 	rsyncPath         string
 	rsyncArgs         []string
 	preserveHardlinks bool
+	syncOwnership     bool
 }
 
 // New cria um Transfer. args são as opções base passadas ao rsync em toda
 // invocação (ver config.Default).
-func New(rsyncPath string, args []string, preserveHardlinks bool) *Transfer {
+// syncOwnership deve refletir a capacidade real do processo de mudar dono e
+// grupo, não o desejo de fazê-lo: ver syncOwner.
+func New(rsyncPath string, args []string, preserveHardlinks, syncOwnership bool) *Transfer {
 	if rsyncPath == "" {
 		rsyncPath = "rsync"
 	}
@@ -40,6 +43,7 @@ func New(rsyncPath string, args []string, preserveHardlinks bool) *Transfer {
 		rsyncPath:         rsyncPath,
 		rsyncArgs:         append([]string(nil), args...),
 		preserveHardlinks: preserveHardlinks,
+		syncOwnership:     syncOwnership,
 	}
 }
 
@@ -197,9 +201,15 @@ func (t *Transfer) SyncAttrs(_ context.Context, src, dst string) error {
 		return nil
 	}
 	if srcLink {
+		if err := t.syncOwner(src, dst, true); err != nil {
+			return err
+		}
 		return lchtimes(dst, srcInfo.ModTime())
 	}
 
+	if err := t.syncOwner(src, dst, false); err != nil {
+		return err
+	}
 	if hash.Perms(srcInfo.Mode()) != hash.Perms(dstInfo.Mode()) {
 		if err := os.Chmod(dst, hash.Perms(srcInfo.Mode())); err != nil {
 			return fmt.Errorf("ajustando modo de %s: %w", dst, err)
@@ -208,6 +218,37 @@ func (t *Transfer) SyncAttrs(_ context.Context, src, dst string) error {
 	mtime := srcInfo.ModTime()
 	if err := os.Chtimes(dst, mtime, mtime); err != nil {
 		return fmt.Errorf("ajustando timestamps de %s: %w", dst, err)
+	}
+	return nil
+}
+
+// syncOwner copia dono e grupo de src para dst.
+//
+// Só age quando o Transfer foi criado com syncOwnership — isto é, quando o
+// processo tem privilégio para tanto. Sem ele, o chown falharia com EPERM em
+// toda tentativa, e a divergência de propriedade seria detectada e nunca
+// resolvida: cada reconciliação refaria o mesmo trabalho inútil, para sempre.
+// Melhor não comparar do que comparar sem poder agir.
+func (t *Transfer) syncOwner(src, dst string, isLink bool) error {
+	if !t.syncOwnership {
+		return nil
+	}
+
+	srcStat, err := hash.StatOf(src)
+	if err != nil {
+		return err
+	}
+	dstStat, err := hash.StatOf(dst)
+	if err != nil {
+		return err
+	}
+	if !srcStat.OwnerKnown() || srcStat.SameOwner(dstStat) {
+		return nil
+	}
+
+	// Lchown, e não Chown: em um symlink, Chown mudaria o dono do alvo.
+	if err := os.Lchown(dst, srcStat.Uid, srcStat.Gid); err != nil {
+		return fmt.Errorf("ajustando dono de %s para %d:%d: %w", dst, srcStat.Uid, srcStat.Gid, err)
 	}
 	return nil
 }

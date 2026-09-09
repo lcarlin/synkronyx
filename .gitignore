@@ -3,3 +3,6 @@ bin/
 *.db-wal
 *.db-shm
 .synkronyx/
+
+# scripts pessoais de conveniência, não fazem parte do projeto
+runClaude

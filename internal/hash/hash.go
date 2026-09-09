@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"syscall"
 	"time"
 )
 
@@ -55,7 +56,19 @@ type Stat struct {
 	Mode  os.FileMode
 	IsDir bool
 	Kind  FileKind
+
+	// Uid e Gid valem UnknownOwner quando não foi possível obtê-los.
+	Uid int
+	Gid int
 }
+
+// UnknownOwner marca dono ou grupo indeterminado — em um Stat que não pôde
+// lê-los, ou em uma entrada de estado gravada antes de o Synkronyx passar a
+// registrá-los.
+//
+// A distinção importa: 0 é o root, e tratar "não sei" como "root" faria a
+// reconciliação enxergar divergência onde não há.
+const UnknownOwner = -1
 
 // StatOf coleta a identidade barata de um path absoluto.
 //
@@ -67,13 +80,31 @@ func StatOf(abs string) (Stat, error) {
 	if err != nil {
 		return Stat{}, err
 	}
-	return Stat{
+	st := Stat{
 		Size:  fi.Size(),
 		MTime: fi.ModTime(),
 		Mode:  fi.Mode(),
 		IsDir: fi.IsDir(),
 		Kind:  KindOf(fi.Mode()),
-	}, nil
+		Uid:   UnknownOwner,
+		Gid:   UnknownOwner,
+	}
+	if sys, ok := fi.Sys().(*syscall.Stat_t); ok {
+		st.Uid, st.Gid = int(sys.Uid), int(sys.Gid)
+	}
+	return st, nil
+}
+
+// OwnerKnown informa se dono e grupo foram determinados.
+func (s Stat) OwnerKnown() bool { return s.Uid != UnknownOwner && s.Gid != UnknownOwner }
+
+// SameOwner compara dono e grupo, tratando "desconhecido" de qualquer um dos
+// lados como ausência de evidência de diferença.
+func (s Stat) SameOwner(other Stat) bool {
+	if !s.OwnerKnown() || !other.OwnerKnown() {
+		return true
+	}
+	return s.Uid == other.Uid && s.Gid == other.Gid
 }
 
 // PermMask são os bits de permissão que o Synkronyx sincroniza: os nove

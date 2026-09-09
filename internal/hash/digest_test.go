@@ -227,3 +227,50 @@ func TestParseDigestEmptyIsZero(t *testing.T) {
 		t.Error("string vazia deveria produzir digest zero")
 	}
 }
+
+func TestStatOfReadsOwner(t *testing.T) {
+	dir := t.TempDir()
+	p := write(t, dir, "f.txt", 10, 'x')
+
+	st, err := StatOf(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !st.OwnerKnown() {
+		t.Fatal("dono e grupo não foram lidos")
+	}
+	if st.Uid != os.Getuid() || st.Gid != os.Getgid() {
+		t.Errorf("dono = %d:%d, quero %d:%d", st.Uid, st.Gid, os.Getuid(), os.Getgid())
+	}
+}
+
+// Desconhecido não é igual a root. Uma entrada de estado gravada antes de o
+// Synkronyx registrar dono e grupo tem -1, e tratá-la como uid 0 faria a
+// reconciliação enxergar divergência onde não há.
+func TestSameOwnerTreatsUnknownAsNoEvidence(t *testing.T) {
+	conhecido := Stat{Uid: 1000, Gid: 1000}
+	desconhecido := Stat{Uid: UnknownOwner, Gid: UnknownOwner}
+	root := Stat{Uid: 0, Gid: 0}
+
+	if !conhecido.SameOwner(desconhecido) {
+		t.Error("dono desconhecido não deveria contar como divergência")
+	}
+	if !desconhecido.SameOwner(conhecido) {
+		t.Error("a comparação deveria ser simétrica")
+	}
+	if conhecido.SameOwner(root) {
+		t.Error("1000:1000 e 0:0 são donos diferentes")
+	}
+	if !conhecido.SameOwner(Stat{Uid: 1000, Gid: 1000}) {
+		t.Error("donos iguais deveriam comparar iguais")
+	}
+}
+
+func TestOwnerKnownRequiresBoth(t *testing.T) {
+	if (Stat{Uid: 1000, Gid: UnknownOwner}).OwnerKnown() {
+		t.Error("gid desconhecido deveria tornar o dono indeterminado")
+	}
+	if (Stat{Uid: UnknownOwner, Gid: 1000}).OwnerKnown() {
+		t.Error("uid desconhecido deveria tornar o dono indeterminado")
+	}
+}

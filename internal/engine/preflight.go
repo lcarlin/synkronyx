@@ -24,6 +24,10 @@ const watchPressureWarn = 0.8
 func (e *Engine) runPreflight(_ context.Context) {
 	e.checkOwnership()
 	e.checkFilesystems()
+
+	if e.syncOwnership {
+		e.log.Info("dono e grupo entram na reconciliação", "euid", euid())
+	}
 }
 
 // checkOwnership avisa quando a configuração pede preservação de dono e o
@@ -40,8 +44,9 @@ func (e *Engine) checkOwnership() {
 		return
 	}
 	e.log.Warn("os argumentos do rsync pedem preservação de dono e grupo, mas o processo "+
-		"não roda como root: os arquivos no destino ficarão com o dono do serviço "+
-		"e o rsync não vai reclamar disso",
+		"não roda como root: os arquivos no destino ficarão com o dono do serviço, "+
+		"o rsync não vai reclamar, e a reconciliação não compara dono nem grupo — "+
+		"comparar sem poder alterar produziria divergência detectada e nunca resolvida",
 		"rsync_args", e.cfg.RsyncArgs, "euid", euid())
 }
 

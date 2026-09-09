@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    # A suíte exige Linux de verdade: os testes de watcher falam com o inotify
+    # do kernel, e os de engine invocam o rsync. Nada disso tem substituto
+    # portátil, e mockar seria testar as próprias suposições do código em vez
+    # do comportamento.
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Confirmar dependências externas
+        run: |
+          rsync --version | head -1
+          echo "max_user_watches: $(cat /proc/sys/fs/inotify/max_user_watches)"
+
+      - name: Formatação
+        run: |
+          arquivos=$(gofmt -l .)
+          if [ -n "$arquivos" ]; then
+            echo "não formatados:"; echo "$arquivos"; exit 1
+          fi
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Testes com detector de corrida
+        # -race porque o engine coordena watchers, workers e a fila de retry em
+        # goroutines distintas; sem ele a suíte não cobre o que mais importa.
+        run: go test -race -count=1 ./...
+
+      - name: Build estático
+        run: |
+          CGO_ENABLED=0 go build -trimpath -o /tmp/synkronyx ./cmd/synkronyx
+          /tmp/synkronyx -version
+          file /tmp/synkronyx

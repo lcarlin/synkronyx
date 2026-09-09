@@ -1,5 +1,7 @@
 # Synkronyx
 
+[![CI](https://github.com/lcarlin/synkronyx/actions/workflows/ci.yml/badge.svg)](https://github.com/lcarlin/synkronyx/actions/workflows/ci.yml)
+
 Serviço Linux de sincronização bidirecional contínua entre duas árvores de
 diretórios. Uma alteração em `A` chega a `B`, uma alteração em `B` chega a
 `A`, e o sistema não entra em loop no meio do caminho.
@@ -201,6 +203,11 @@ watcher sinaliza e o engine responde com um Full Resync automático. Se a raiz
 observada for removida, movida ou desmontada, o watcher reporta falha terminal
 e o serviço encerra para o systemd reiniciá-lo — seguir rodando deixaria um
 lado cego enquanto o outro continua propagando.
+
+## Licença
+
+GPL-3.0 — ver [LICENSE](LICENSE). Versões modificadas distribuídas a terceiros
+precisam ter o código-fonte disponibilizado sob a mesma licença.
 
 ## Layout
 
