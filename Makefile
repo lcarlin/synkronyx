@@ -67,23 +67,24 @@ install: build
 	install -Dm0644 deploy/99-synkronyx-inotify.conf $(DESTDIR)/etc/sysctl.d/99-synkronyx-inotify.conf
 	install -Dm0640 configs/synkronyx.example.yaml $(DESTDIR)/etc/synkronyx/synkronyx.example.yaml
 	@echo
-	@echo "Instalado. Próximos passos:"
+	@echo "Instalado. Próximos passos, NESTA ordem:"
 	@echo
-	@echo "  1. Configuração (as raízes /dados/A e /dados/B já vêm definidas):"
-	@echo "       cp /etc/synkronyx/synkronyx.example.yaml /etc/synkronyx/synkronyx.yaml"
-	@echo
-	@echo "  2. Criar as raízes e dar acesso ao usuário do serviço."
-	@echo "     O install não faz isso: são seus dados, e a escolha de dono e"
-	@echo "     modo depende de quem mais precisa acessá-los."
-	@echo "       mkdir -p /dados/A /dados/B"
-	@echo "       chown synkronyx:synkronyx /dados/A /dados/B   # se usar o unit padrão"
-	@echo
-	@echo "  3. Usuário do serviço e limites do inotify:"
+	@echo "  1. Criar o usuário e o grupo do serviço, e aplicar os limites do inotify."
+	@echo "     Vem antes do chown do passo 3, que precisa que eles já existam:"
 	@echo "       systemd-sysusers && sysctl --system && systemctl daemon-reload"
 	@echo
-	@echo "  4. Validar antes de habilitar — recusa com mensagem clara se as"
-	@echo "     raízes não existirem ou não forem acessíveis:"
-	@echo "       synkronyx -config /etc/synkronyx/synkronyx.yaml -check"
+	@echo "  2. Configuração (as raízes /dados/A e /dados/B já vêm definidas):"
+	@echo "       cp /etc/synkronyx/synkronyx.example.yaml /etc/synkronyx/synkronyx.yaml"
+	@echo
+	@echo "  3. Criar as raízes e dar acesso ao usuário do serviço."
+	@echo "     O install não cria as raízes: são seus dados, e a escolha de dono"
+	@echo "     e modo depende de quem mais precisa acessá-los."
+	@echo "       mkdir -p /dados/A /dados/B"
+	@echo "       chown synkronyx:synkronyx /dados/A /dados/B   # só para o unit padrão"
+	@echo
+	@echo "  4. Validar antes de habilitar. Rodar como o usuário do serviço confere"
+	@echo "     também o acesso, não só a existência das raízes:"
+	@echo "       sudo -u synkronyx synkronyx -config /etc/synkronyx/synkronyx.yaml -check"
 	@echo
 	@echo "  5. Habilitar. Use UM dos dois units, nunca ambos:"
 	@echo "       systemctl enable --now synkronyx        # sem privilégio, sem dono/grupo"

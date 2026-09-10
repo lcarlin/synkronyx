@@ -67,7 +67,20 @@ Instalação como serviço:
 
 ```bash
 sudo make install
-sudo systemd-sysusers && sudo sysctl --system && sudo systemctl daemon-reload
+
+# O usuário e o grupo synkronyx vêm do arquivo que o install colocou em
+# /usr/lib/sysusers.d/ — então systemd-sysusers só funciona DEPOIS do install,
+# e o chown mais abaixo só funciona depois dele.
+sudo systemd-sysusers
+sudo sysctl --system && sudo systemctl daemon-reload
+
+sudo cp /etc/synkronyx/synkronyx.example.yaml /etc/synkronyx/synkronyx.yaml
+sudo mkdir -p /dados/A /dados/B
+sudo chown synkronyx:synkronyx /dados/A /dados/B   # só para o unit padrão
+
+# Como o usuário do serviço, para conferir acesso e não só existência:
+sudo -u synkronyx synkronyx -config /etc/synkronyx/synkronyx.yaml -check
+
 sudo systemctl enable --now synkronyx
 journalctl -u synkronyx -f
 ```
