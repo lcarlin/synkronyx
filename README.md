@@ -51,6 +51,15 @@ make hooks          # aponta core.hooksPath para .githooks
 O hook leva o tempo da suíte com `-race` (algo em torno de 30 s). `git push
 --no-verify` pula quando for realmente necessário.
 
+## Documentação
+
+| Documento | Para quê |
+|---|---|
+| [Manual de instalação](docs/INSTALACAO.md) | Requisitos, instalação passo a passo, todos os parâmetros de configuração, problemas conhecidos e FAQ |
+| [Manual de operação](docs/OPERACAO.md) | Dia a dia, dicionário das mensagens de log, diagnóstico, ajuste, backup e cenários de desastre |
+| [Decisões e limitações](docs/DECISOES-ABERTAS.md) | O que o projeto escolheu não fazer, e por quê |
+| [ADR 001](docs/adr-001-prevencao-de-loops.md) | A prevenção de loops em detalhe |
+
 ## Uso
 
 ```bash
